@@ -525,13 +525,22 @@ class Dashboard:
         # send_message blocks up to 30 s waiting for MSG_ACK; run it in the
         # background and answer 202. The message row is stored before the
         # ACK wait, so it shows up in /api/conversations immediately.
+        # Attribution (message -> peer) is recorded twice: a fast path
+        # below for the instant 202 response, and reliably here in the
+        # background thread, because under load the row may be stored
+        # after the fast path's short window expires.
         def _bg():
+            mid = None
             try:
-                c.send_message(peer, text)
+                mid = c.send_message(peer, text)
             except AcpError as e:
                 c.audit.log("dashboard.send_failed", actor=peer,
                             result="failed",
                             details={"code": e.code, "detail": e.detail})
+            if mid is None:
+                mid = self._await_recent_sent(text, timeout=10.0)
+            if mid:
+                self._map_message(mid, peer)
 
         threading.Thread(target=_bg, daemon=True,
                          name="acp-dash-send").start()
