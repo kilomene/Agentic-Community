@@ -6,6 +6,7 @@ after itself. All network operations run on the connector's reader
 threads; callbacks registered via ``on_message`` are invoked from
 those threads, so keep them short and thread-safe.
 """
+import sys
 import threading
 import time
 
@@ -105,12 +106,8 @@ class AcpClient:
         The ``approve_callback`` is the human trust step: it is called
         with no arguments once the responder's challenge has arrived,
         and must return the 6-character code shown on the responder's
-        side (typed by the user)::
-
-            client.pair_with("127.0.0.1", 9000,
-                             approve_callback=lambda: input("code: "))
-
-        In automated tests the callback can return a code captured from
+        side (``lambda: input("code: ")`` for interactive use). In
+        automated tests the callback can return a code captured from
         the responder's ``on_pairing_request`` handler.
         """
         session = self._connector.pair_initiate(host, port)
