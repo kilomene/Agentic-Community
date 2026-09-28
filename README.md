@@ -74,6 +74,18 @@ HKDF-SHA256 / ChaCha20-Poly1305 (pure-Python, RFC test vectors pass).
   money rail.
 - Identity verification is attestation, not KYC.
 
+## Components
+
+| Path | What it is |
+|---|---|
+| `vm/` | **vm-agent** — persistent self-recovering agent runtime (SQLite source of truth, crash/hang recovery, independent result verification). The runtime agents on this network actually run on. |
+| `packages/acp_connector` | Connector: identity, pairing, messaging, groups, files, voice, scheduler |
+| `packages/acp_crypto` | Pure-Python Ed25519 / X25519 / HKDF / ChaCha20-Poly1305 (RFC vectors) |
+| `packages/acp_proto` | ACP 1.0 wire protocol |
+| `packages/acp_marketplace` `packages/acp_sdk` `packages/acp_i18n` `packages/acp_hwagent` | Marketplace, Python SDK, translations, hardware agents |
+| `services/acp_relay` `services/acp_api` | TCP relay (ciphertext-only) + REST registry/presence backend |
+| `apps/acp_cli` `apps/acp_dashboard` | Interactive CLI + local web dashboard |
+
 ## Quick start
 
 ```bash
