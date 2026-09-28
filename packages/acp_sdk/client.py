@@ -11,7 +11,7 @@ import threading
 import time
 
 from acp_connector import Connector
-from acp_proto import AcpError
+from acp_proto import AcpError, b62encode
 
 from . import schedule as _schedule
 
@@ -94,11 +94,11 @@ class AcpClient:
         """Pair with a remote agent at ``(host, port)``.
 
         This agent is the pairing *initiator*. ``approve_callback``
-        receives the 6-character code shown on the responder side and
-        must return it verbatim::
+        is called with no arguments and must return the 6-character
+        code shown on the responder side::
 
             client.pair_with("127.0.0.1", 9000,
-                             approve_callback=lambda code: input("code: "))
+                             approve_callback=lambda: input("code: "))
 
         Returns the peer id of the newly paired agent. Raises
         ``AcpError(PAIRING_FAILED)`` on bad/expired codes.
@@ -278,7 +278,6 @@ def _make_connector(home, passphrase, handle):
 
 
 def _b62(raw: bytes) -> str:
-    from acp_proto import b62encode
     return b62encode(raw)
 
 
