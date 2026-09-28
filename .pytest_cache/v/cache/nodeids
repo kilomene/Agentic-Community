@@ -103,6 +103,7 @@
   "tests/test_i18n.py::PatchTests::test_emit_wrapper_translates",
   "tests/test_i18n.py::PatchTests::test_error_lines_translated",
   "tests/test_i18n.py::PatchTests::test_unknown_lines_pass_through",
+  "tests/test_marketplace.py::test_marketplace_suite",
   "tests/test_proto.py::test_b62_roundtrip",
   "tests/test_proto.py::test_canonical_deterministic",
   "tests/test_proto.py::test_e2e_roundtrip",
