@@ -123,13 +123,14 @@ def test_e2e_tampered_box_rejected():
                             {"text": "secret", "msg_id": "m3"}, A["s_priv"],
                             A["x_priv"], A["x_pub"], B["x_pub"])
     env["box"] = dict(env["box"])
-    ct = bytearray(b62decode(env["box"]["ct"]))
+    ct = bytearray(b62decode_fixed(env["box"]["ct"]))
     ct[0] ^= 1
-    env["box"]["ct"] = b62encode(bytes(ct))
+    env["box"]["ct"] = b62encode_fixed(bytes(ct))
     # re-sign so signature passes and decryption is what fails
     from acp_crypto import ed25519_sign
     from acp_proto import canonical, _unsigned
-    env["sig"] = b62encode(ed25519_sign(A["s_priv"], canonical(_unsigned(env))))
+    env["sig"] = b62encode_fixed(
+        ed25519_sign(A["s_priv"], canonical(_unsigned(env))))
     try:
         open_e2e_envelope(env, PUBKEYS.get, B["x_priv"])
         raise AssertionError("tampered box decrypted!")
