@@ -13,8 +13,6 @@ escalates instead of repeating the cycle (phase 56).
 import hashlib
 import time
 
-from . import classify as classify_mod
-
 
 def fingerprint(failure_kind, operation, error_text=""):
     """Stable signature for a recurring failure.
