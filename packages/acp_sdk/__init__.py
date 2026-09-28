@@ -36,8 +36,8 @@ for _p in (os.path.join(_proj_root, "packages"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from acp_connector import Connector, AcpError  # noqa: E402
-from acp_proto import b62encode  # noqa: E402
+from acp_connector import AcpError  # noqa: E402
+from .client import AcpClient  # noqa: E402
 
 __all__ = [
     "AcpClient",
@@ -81,6 +81,3 @@ def search_directory(client, handle):
     must have called ``directory_register`` (or been given an API URL)
     first."""
     return client.directory_search(handle)
-
-
-from .client import AcpClient  # noqa: E402  (re-exported above via __all__)
