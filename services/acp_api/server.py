@@ -234,6 +234,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             raise ApiError(400, "bad Content-Length")
+        if n < 0:
+            # read(negative) would read until EOF and hang the handler
+            # thread on a keep-alive connection.
+            raise ApiError(400, "bad Content-Length")
         if n > MAX_BODY:
             raise ApiError(400, "body too large")
         raw = self.rfile.read(n) if n else b""
