@@ -27,7 +27,7 @@ import time
 
 from acp_crypto import random_bytes
 from acp_proto import (
-    AcpError, b62encode, make_envelope,
+    AcpError, make_envelope,
     PAIR_REQUEST, PAIR_CHALLENGE, PAIR_CONFIRM, PAIR_WELCOME,
 )
 
@@ -44,6 +44,17 @@ def new_code(n=6):
 
 def code_hash(code):
     return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def _check_x_pub(value, what):
+    """Validate a peer-supplied X25519 public key (64-char hex)."""
+    try:
+        raw = bytes.fromhex(value or "")
+    except (ValueError, TypeError, AttributeError):
+        raise AcpError("PAIRING_FAILED", f"{what} is not hex")
+    if len(raw) != 32:
+        raise AcpError("PAIRING_FAILED", f"{what} wrong length")
+    return value
 
 
 class PairingSession:
@@ -125,7 +136,7 @@ class PairingSession:
         self._ensure_live()
         self.attempts += 1
         typed = str(code).strip().upper()
-        if self.attempts >= MAX_CONFIRM_ATTEMPTS:
+        if self.attempts > MAX_CONFIRM_ATTEMPTS:
             self._fail("too many code attempts")
             raise AcpError("PAIRING_FAILED", "too many code attempts")
         if not hmac.compare_digest(code_hash(typed), self.code_hash or ""):
@@ -222,7 +233,8 @@ class PairingManager:
         session = self._new_session(
             "responder", peer_pid=peer_pid,
             peer_handle=payload.get("handle", ""),
-            peer_x_pub=payload.get("x_pub"), peer_ipub=payload.get("ipub"))
+            peer_x_pub=_check_x_pub(payload.get("x_pub"), "x_pub"),
+            peer_ipub=payload.get("ipub"))
         session.conn = conn
         session.code = new_code()
         session.code_hash = code_hash(session.code)
@@ -252,7 +264,7 @@ class PairingManager:
         session._ensure_live()
         session.peer_pid = env["from"]
         session.peer_handle = payload.get("handle", "")
-        session.peer_x_pub = payload.get("x_pub")
+        session.peer_x_pub = _check_x_pub(payload.get("x_pub"), "x_pub")
         session.peer_ipub = payload.get("ipub")
         session.code_hash = payload.get("code_hash")
         session.conn = conn
