@@ -192,6 +192,35 @@ class PairingManager:
                     result="ok", details={"session": session.session_id})
         return session
 
+    def pair_initiate_relay(self, peer_pid):
+        """Start pairing with a peer reachable via the relay (no dial).
+
+        The pair_request goes out through the shared relay link
+        (Connector._get_conn falls back to it); no per-pid binding is
+        created here. The challenge handler binds the peer to the link
+        when the response arrives. Returns the initiator session.
+        """
+        c = self._c
+        link = c._relay_link
+        if link is None or link.closed:
+            raise AcpError("INTERNAL",
+                           "no relay link — relay_connect(url) first")
+        session = self._new_session("initiator")
+        session.peer_pid = peer_pid
+        session.conn = link
+        payload = {
+            "handle": c.handle,
+            "x_pub": c.identity.x_pub.hex(),
+            "ipub": c.identity.ed_pub.hex(),
+        }
+        c._send_plain(PAIR_REQUEST, peer_pid, payload)
+        c.audit.log("pairing.initiated", target="relay", result="ok",
+                    details={"session": session.session_id,
+                             "peer": peer_pid[:16]
+                             if isinstance(peer_pid, str) else peer_pid,
+                             "via": "relay"})
+        return session
+
     def get_session(self, session_id):
         with self._lock:
             return self._sessions.get(session_id)
@@ -212,7 +241,9 @@ class PairingManager:
         for s in list(self._sessions.values()):
             if s.state not in ("done", "failed") and s.expires_at < now:
                 s._fail("expired")
-                if s.conn is not None:
+                # Never close the shared relay link here: it belongs to
+                # the Connector and serves all pids.
+                if s.conn is not None and s.conn is not self._c._relay_link:
                     try:
                         s.conn.close()
                     except Exception:
