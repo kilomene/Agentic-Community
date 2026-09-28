@@ -44,26 +44,6 @@ TOOL_CAPABILITY = {
     "acp": "ACP_NETWORK",
 }
 
-# Default capability sets per task kind. The scheduler grants only these;
-# anything more needs escalation.
-DEFAULT_CAPS = {
-    "build": {"FILES_READ", "FILES_WRITE", "SHELL_EXECUTE", "NETWORK_ACCESS"},
-    "test": {"FILES_READ", "SHELL_EXECUTE"},
-    "deploy": {"FILES_READ", "NETWORK_ACCESS", "DEPLOY"},
-    "browse": {"NETWORK_ACCESS", "BROWSER_CONTROL", "FILES_READ"},
-    "db": {"DATABASE_READ", "DATABASE_WRITE"},
-    "communicate": {"ACP_NETWORK", "FILES_READ"},
-    "admin": set(),  # admin tasks declare their caps explicitly
-}
-
-# Capabilities that can never be granted without an auth token.
-ESCALATION_CAPS = {
-    "PROCESS_CONTROL",
-    "SYSTEM_SERVICE_CONTROL",
-    "DEPLOY",
-    "DATABASE_WRITE",
-}
-
 
 def check(store, task_id, capability):
     """Returns (allowed, reason)."""
@@ -126,18 +106,6 @@ def request_escalation(store, task_id, tool, auth_token=None, journal=None):
                     journal=journal)
 
 
-def grant_defaults(store, task_id, task_kind="build", journal=None):
-    """Scheduler grants the minimal default set for a task kind."""
-    granted = set()
-    for cap in DEFAULT_CAPS.get(task_kind, set()):
-        store.capability_grant(task_id, cap, granted_by="scheduler")
-        granted.add(cap)
-    if journal:
-        journal("CAPS_GRANTED", task_id=task_id, caps=sorted(granted),
-                by="scheduler")
-    return granted
-
-
 def escalate(store, task_id, capability, auth_token=None, journal=None):
     """Capability escalation: requires explicit policy authorization.
     The model can never do this on its own."""
@@ -154,10 +122,3 @@ def escalate(store, task_id, capability, auth_token=None, journal=None):
         journal("CAP_ESCALATED", task_id=task_id, capability=capability,
                 by="policy:human")
     return True, "escalated with policy authorization"
-
-
-def revoke_all(store, task_id, journal=None):
-    for cap in store.capabilities_for(task_id):
-        store.capability_revoke(task_id, cap)
-    if journal:
-        journal("CAPS_REVOKED", task_id=task_id)
