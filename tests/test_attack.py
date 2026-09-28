@@ -16,6 +16,8 @@ defeated):
  10. oversized file            -> FILE_TOO_LARGE, rejected before transfer
  11. relay visibility          -> relay sees routing metadata only;
                                   the E2E box stays opaque
+ 12. hostile file offer name   -> sanitized, contained in incoming/
+ 13. manifest path traversal   -> FILE_REJECTED at verify time
 
 Run: python3 tests/test_attack.py
 """
@@ -601,11 +603,68 @@ def t_relay_visibility():
           flush=True)
 
 
+# ------------------------------------------------- 12. hostile file name
+@case("12. hostile file offer name -> contained in incoming/, sanitized")
+def t_hostile_filename():
+    """A compromised peer hand-crafts a FILE_OFFER with a traversal name.
+    The receiver must never write outside its incoming dir."""
+    from acp_proto import FILE_OFFER  # noqa: E402
+    fid = "ab" * 16
+    payload = {"file_id": fid, "name": "../../evil.sh",
+               "size": 64, "sha256": "00" * 32, "chunks": 1}
+    # a real, correctly-signed E2E envelope from the (paired) attacker —
+    # only the *name* is hostile, exactly what a patched client sends
+    env = make_e2e_envelope(FILE_OFFER, alice.peer_id, bob.peer_id,
+                            payload, alice.identity.ed_priv,
+                            alice.identity.x_priv, alice.identity.x_pub,
+                            bob_x_pub())
+    s = socket.create_connection(("127.0.0.1", port_b), timeout=10)
+    try:
+        s.sendall(frame_envelope(env))
+        row = wait_until(lambda: bob.store.get_transfer(fid),
+                         what="transfer recorded")
+    finally:
+        s.close()
+    name = row["name"]
+    assert "/" not in name and "\\" not in name and ".." not in name, name
+    part = os.path.realpath(row["path"])
+    incoming = os.path.realpath(bob.incoming_dir)
+    assert part.startswith(incoming + os.sep), part
+    # nothing escaped next to the home dir
+    assert not os.path.exists(os.path.join(home_b, "evil.sh")), \
+        "traversal wrote outside incoming/"
+    print(f"   hostile name stored as {name!r} inside incoming/",
+          flush=True)
+
+
+# ------------------------------------------- 13. manifest path traversal
+@case("13. marketplace manifest path traversal -> FILE_REJECTED")
+def t_manifest_traversal():
+    """An attacker hand-crafts a manifest (bypassing build_manifest) with
+    a '../' file entry and a VALID signature. verify_manifest must reject
+    it before the signature even matters."""
+    from acp_marketplace import manifest as manifestmod  # noqa: E402
+    ed_priv, ed_pub = generate_ed25519_keypair()
+    man = {"name": "evil", "version": "1.0.0", "description": "x",
+           "capabilities": [], "entry_point": "main.py",
+           "files": [{"path": "../evil.py", "sha256": "00" * 32}],
+           "publisher_id": "attacker", "ts": 1}
+    signed = manifestmod.sign_manifest(man, ed_priv)
+    try:
+        manifestmod.verify_manifest(
+            signed, lambda pid: ed_pub if pid == "attacker" else None)
+    except AcpError as e:
+        assert e.code == "FILE_REJECTED", e.code
+    else:
+        raise AssertionError("traversal manifest verified!")
+    print("   '../evil.py' rejected at verify time", flush=True)
+
+
 def main():
     fns = [t_forged_signature, t_replay, t_wrong_code, t_mitm,
            t_chunk_tamper, t_permission_escalation, t_expired,
            t_unknown_sender, t_wrong_recipient, t_oversized_file,
-           t_relay_visibility]
+           t_relay_visibility, t_hostile_filename, t_manifest_traversal]
     for fn in fns:
         name = fn._name
         t0 = time.time()
