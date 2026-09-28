@@ -75,6 +75,9 @@ class Connector:
         # Scheduler: cron-like persisted tasks (actions are connector
         # operations or app-registered callbacks — never shell).
         self.scheduler = Scheduler(self)
+        # Analytics: privacy-respecting local counters (opt-in reporting).
+        from .analytics import Analytics
+        self.analytics = Analytics(self)
 
         self._conns = {}  # pid -> Conn
         self._conns_lock = threading.Lock()
@@ -545,6 +548,30 @@ class Connector:
     def audit_log(self, limit=200):
         return self.audit.tail(limit=limit)
 
+    # --------------------------------------------------------------- metrics
+    def _metric(self, name, nbytes=0):
+        """Record an analytics counter if analytics is attached.
+
+        Never raises: metrics must not break the data path.
+        """
+        try:
+            a = self.analytics
+        except AttributeError:
+            return
+        try:
+            if name == "message_sent":
+                a.message_sent(nbytes)
+            elif name == "message_received":
+                a.message_received(nbytes)
+            elif name == "file_completed":
+                a.file_completed()
+            elif name == "pairing_completed":
+                a.pairing_completed()
+            elif name == "call_placed":
+                a.call_placed()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ bridge
     def _on_bridge_route(self, kind, payload, owner):
         """Per-connector policy passthrough for bridge fan-out."""
@@ -561,5 +588,9 @@ class Connector:
                 break
             try:
                 self.pairing.sweep()
+            except Exception:
+                pass
+            try:
+                self.analytics.heartbeat()
             except Exception:
                 pass
