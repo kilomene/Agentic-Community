@@ -26,7 +26,6 @@ this is what makes resume-after-crash safe.
 """
 import os
 import signal
-import sys
 import time
 
 from . import config as config_mod
@@ -34,7 +33,7 @@ from . import resources as resmod
 from .recovery import RecoveryManager
 from .state import Store
 from .tools import Executor
-from .verify import Verifier
+from .verify import Verdict, Verifier
 from .policy import Policy
 from .txn import TxnRunner
 
@@ -42,21 +41,15 @@ from .txn import TxnRunner
 from . import caps as capsmod
 from . import classify as classifymod
 from . import failure as failuremod
-from . import ownership as ownershipmod
 from . import planner as plannermod
 from . import progress as progressmod
 from . import secrets as secretsmod
-from . import timecheck as timecheckmod
 
 PRIORITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "NORMAL": 2, "LOW": 3}
 
 # Phase 65: preemption caps — a preempted task can be preempted at most this
 # many times before it refuses further preemption (prevents starvation).
 MAX_PREEMPTIONS = 2
-
-# Phase 52: state-aware cancellation flow
-CANCEL_FLOW = ["CANCEL_REQUESTED", "STOPPING", "CLEANUP", "CHECKPOINT",
-               "CANCELLED"]
 
 
 class AgentRuntime:
@@ -367,6 +360,10 @@ class AgentRuntime:
             start = max(start, ckpt["step"] + 1)
 
         idx = start
+        # Phase 39/68: duration budget is charged per step boundary — track
+        # the last sample so we consume only the delta, not the cumulative
+        # elapsed (charging cumulative elapsed every step bills N×elapsed).
+        duration_last_ts = self._task_start_ts[task_id]
         while idx < len(steps):
             if self._shutdown:
                 self._release_task(task_id, idx, "PAUSED", "shutdown")
@@ -381,10 +378,12 @@ class AgentRuntime:
                 self._preempt(task_id, idx)
                 return "PREEMPTED"
             # Phase 39/68: duration budget
+            now = time.time()
             if not self._budget_ok(task_id, "duration_s",
-                                   time.time() - self._task_start_ts[task_id]):
+                                   now - duration_last_ts):
                 self._release_task(task_id, idx, "PAUSED", "budget")
                 return "PAUSED"
+            duration_last_ts = now
             # Phase 68: memory pressure — pause this task if it exceeds its
             # memory budget (bytes RSS sampled per step).
             mem_limit = (spec.get("budgets") or {}).get("memory_mb")
@@ -403,7 +402,28 @@ class AgentRuntime:
             if not self._budget_ok(task_id, "tool_calls", 1):
                 self._release_task(task_id, idx, "PAUSED", "budget")
                 return "PAUSED"
-            result = self._run_step(task_id, idx, step, task)
+            result = None
+            try:
+                result = self._run_step(task_id, idx, step, task)
+            except PermissionError as e:
+                # The step (or its verify spec) references a vault secret
+                # that was never granted to this task. Letting this escape
+                # would crash the agent and crash-loop under the supervisor
+                # (the spec is unchanged on restart), so fail the task with
+                # an open intervention for an operator instead.
+                self.journal("STEP_VAULT_DENIED", task_id=task_id, step=idx,
+                             details={"error": str(e)})
+                self.store.intervention_open(
+                    task_id=task_id,
+                    reason=f"vault secret not granted: {e}",
+                    required_action="grant the secret via vault_set or "
+                                    "remove the vault reference from the spec",
+                    last_verified_step=step.get("name"))
+                self.store.update_task(task_id, status="FAILED",
+                                       current_step=idx)
+                self.store.release_lease(task_id)
+                self._task_start_ts.pop(task_id, None)
+                return "FAILED"
             if result == "INTERRUPTED":
                 self._release_task(task_id, idx, "PAUSED", "interrupted")
                 return "PAUSED"
@@ -475,7 +495,7 @@ class AgentRuntime:
         idem = step.get("idempotent_check")
         if not idem:
             return None, {"reason": "no idempotent_check to reconcile with"}
-        v = self.verifier.verify_step({"verify": [idem]})
+        v = self._verify_with_policy(None, -1, {"verify": [idem]})
         return v.passed, {"verdict": v.to_dict()}
 
     def _classify_error(self, tool, err_text, exit_code=None):
@@ -499,6 +519,31 @@ class AgentRuntime:
         if tool == "browser":
             return classifymod.classify("browser", "page_timeout")
         return classifymod.classify_tool_error(text, exit_code)
+
+    def _verify_with_policy(self, task_id, idx, step):
+        """Run verify checks, but refuse to EXECUTE a command_ok check the
+        policy would refuse (e.g. a PROTECTED command). Verify specs run
+        shell commands too — they must not bypass the policy gate that
+        guards tool commands just because they sit in `verify` instead
+        of `args`. A refused check fails closed (treated as not passed)."""
+        refused = None
+        for check in (step.get("verify") or []):
+            if isinstance(check, dict) and \
+                    check.get("check") == "command_ok":
+                ok_v, reason_v = self.policy.authorize(
+                    check.get("command", ""))
+                if not ok_v:
+                    refused = reason_v
+                    break
+        if refused is not None:
+            self.journal("POLICY_CHECK", task_id=task_id, step=idx,
+                         tool="verify", reason=refused)
+            return Verdict(
+                False,
+                [{"check": "command_ok", "passed": False,
+                  "reason": f"refused by policy: {refused}"}],
+                {"command_ok": {"error": "refused by policy"}})
+        return self.verifier.verify_step(step)
 
     def _run_step(self, task_id, idx, step, task):
         import json
@@ -553,7 +598,7 @@ class AgentRuntime:
         # Idempotency: skip work already done.
         idem = step.get("idempotent_check")
         if idem:
-            v = self.verifier.verify_step({"verify": [idem]})
+            v = self._verify_with_policy(task_id, idx, {"verify": [idem]})
             if v.passed:
                 self.journal("STEP_SKIPPED", task_id=task_id, step=idx,
                              name=name, reason="idempotent_check passed")
@@ -601,7 +646,7 @@ class AgentRuntime:
             verify_step, verify_secrets = self._resolve_verify_refs(
                 task_id, step)
             secret_values = list(secret_values) + list(verify_secrets)
-            verdict = self.verifier.verify_step(verify_step)
+            verdict = self._verify_with_policy(task_id, idx, verify_step)
             self.store.update_task(
                 task_id, last_verified_result=json.dumps(verdict.to_dict()))
             if res.ok and verdict.passed:
@@ -625,6 +670,13 @@ class AgentRuntime:
                         f"stderr={secretsmod.redact_text(res.stderr[:200])}")
             decision, max_retries, base_backoff, c_reason = \
                 self._classify_error(tool, res.stderr, res.exit_code)
+            # A verify command the policy refused will be refused on every
+            # retry — never loop; refuse like any other policy block.
+            if verdict.evidence.get("command_ok", {}).get("error") == \
+                    "refused by policy":
+                decision, c_reason = (classifymod.POLICY_BLOCKED,
+                                      "verify command refused by policy")
+                max_retries = 0
             # The step spec may cap retries below the classification
             # (e.g. retries: 0 for steps that must not loop). The cap is
             # a ceiling only — it never grants more than the classifier.
