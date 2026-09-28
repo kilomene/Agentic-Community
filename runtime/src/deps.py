@@ -35,18 +35,6 @@ def _run_version(cmd):
         return None
 
 
-def _port_open(host, port, timeout=3):
-    s = socket.socket()
-    s.settimeout(timeout)
-    try:
-        s.connect((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
-
-
 # ---- Phase 51: dependency registry ----
 # name -> {required_version, check_kind, repair_kind}
 # repair_kind: safe_reinstall | manual | none
