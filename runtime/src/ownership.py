@@ -16,16 +16,10 @@
 87: safe resource cleanup: state-aware. Check ownership/references before
     deleting anything. Never blind-clean.
 """
-import os
 import time
-import uuid
 
 
 # ---- phase 85: operation ownership ----
-def new_execution_id():
-    return f"exec-{uuid.uuid4().hex[:12]}"
-
-
 def _op_meta(op):
     import json
     try:
@@ -63,16 +57,6 @@ def heartbeat_operation(store, task_id, op_id, worker_id):
     store.op_set(op_id, task_id, op.get("kind"), op.get("status"),
                  result=meta)
     return True
-
-
-def owns_operation(store, task_id, execution_id, op_id):
-    """True only if this execution owns the operation."""
-    op = store.op_get(op_id)
-    if not op:
-        return False
-    meta = _op_meta(op)
-    return (op.get("task_id") == task_id and
-            meta.get("execution_id") in (execution_id, None))
 
 
 # ---- phase 58/63: resource + external ownership ----
@@ -193,21 +177,3 @@ def cleanup_task_resources(store, task_id, requester, journal=None,
                                       journal)
         (released if ok else refused).append(r["resource_id"])
     return {"released": released, "refused": refused}
-
-
-def cleanup_tmpdir(path, store, task_id, journal=None):
-    """Delete a tmpdir only if no task references it. Returns (ok, reason)."""
-    journal = journal or store.journal
-    rid = f"tmpdir:{path}"
-    r = store.resource_get(rid)
-    if r and r["state"] == "active" and r["task_id"] != task_id:
-        journal("CLEANUP_REFUSED", resource_id=rid, reason="other task owns")
-        return False, f"owned by task {r['task_id']}"
-    try:
-        import shutil
-        if os.path.isdir(path):
-            shutil.rmtree(path)
-        journal("TMPDIR_CLEANED", path=path)
-        return True, "cleaned"
-    except OSError as e:
-        return False, str(e)
