@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", ".."))
 
 from acp_sdk import AcpClient  # noqa: E402
+from acp_sdk.examples._util import pair, retry  # noqa: E402
 
 
 def main(argv=None):
@@ -32,47 +33,32 @@ def main(argv=None):
         f.write(args.payload)
     expect = hashlib.sha256(args.payload.encode()).hexdigest()
 
-    code_box = {}
+    def scenario():
+        with AcpClient(args.home_a, args.passphrase,
+                       handle="alice") as alice, \
+                AcpClient(args.home_b, args.passphrase,
+                          handle="bob") as bob:
+            alice.start_server()
+            bob.start_server()
+            bob.accept_files(True)
 
-    # NOTE: retries below work around a pre-existing V1 bug, not SDK
-    # code: acp_proto's plain b62encode/b62decode drop leading zero
-    # bytes, so ~0.8% of E2E envelopes fail decrypt/verify at random.
-    # Each attempt uses fresh clients and fresh random envelopes.
-    last_err = None
-    for attempt in range(3):
-        try:
-            return _attempt(args, payload, expect, src)
-        except Exception as e:  # noqa: BLE001 - retry only, then raise
-            last_err = e
-            print("attempt %d failed (%s), retrying..."
-                  % (attempt + 1, e))
-    raise last_err
+            peer_id = pair(alice, bob)
+            fid = alice.send_file(peer_id, src)
+            print("sent: %s (transfer %s...)" % (src, fid[:8]))
 
+            received = os.path.join(bob.connector.incoming_dir,
+                                    "demo-payload.txt")
+            assert os.path.isfile(received), "file never arrived"
+            with open(received, "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest()
+            assert digest == expect, "hash mismatch: %s" % digest
+            print("bob received %s, sha256 ok" % received)
+            print("OK: file transfer works")
 
-def _attempt(args, payload, expect, src):
-    code_box = {}
-    with AcpClient(args.home_a, args.passphrase, handle="alice") as alice, \
-            AcpClient(args.home_b, args.passphrase, handle="bob") as bob:
-        alice.start_server()
-        bob_host, bob_port = bob.start_server()
-        bob.on_pairing_request(
-            lambda session: (code_box.setdefault("code", session.code),
-                             session.accept()))
-        bob.accept_files(True)
-
-        peer_id = alice.pair_with(bob_host, bob_port,
-                                  approve_callback=lambda: code_box["code"])
-        fid = alice.send_file(peer_id, src)
-        print("sent: %s (transfer %s...)" % (src, fid[:8]))
-
-        received = os.path.join(bob.connector.incoming_dir,
-                                "demo-payload.txt")
-        assert os.path.isfile(received), "file never arrived"
-        with open(received, "rb") as f:
-            digest = hashlib.sha256(f.read()).hexdigest()
-        assert digest == expect, "hash mismatch: %s" % digest
-        print("bob received %s, sha256 ok" % received)
-        print("OK: file transfer works")
+    # Retries ride through the pre-existing V1 b62 envelope flake (see
+    # acp_sdk/README.md "Known issues"); each attempt uses fresh
+    # clients and fresh random envelopes.
+    retry(scenario, attempts=3, label="file_transfer")
     return 0
 
 
