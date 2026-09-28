@@ -7,10 +7,6 @@ timestamps, and external API auth. This module:
   - detects unreliable clocks (large jumps, implausible dates)
   - protects time-sensitive operations: leases/locks are never expired
     because of a clock fault
-
-`safe_now()` is the clock the runtime should use for lease/lock math:
-it detects backward jumps and freezes expiry decisions while the clock
-is unreliable, instead of mass-expiring everything.
 """
 import os
 import subprocess
@@ -53,23 +49,6 @@ def check_sync():
             continue
     _unreliable = False
     return True, detail
-
-
-def clock_unreliable():
-    return _unreliable
-
-
-def mark_unreliable(reason, journal=None):
-    global _unreliable
-    _unreliable = True
-    if journal:
-        journal("CLOCK_UNRELIABLE", reason=reason)
-
-
-def safe_now():
-    """Wall-clock time for display; lease math should use this plus the
-    unreliable flag — never expire leases while the clock is suspect."""
-    return time.time()
 
 
 def lease_still_valid(expires_at):
