@@ -1,7 +1,0 @@
-{
-  "tests/test_attack.py::test": true,
-  "tests/test_connector.py::test": true,
-  "tests/test_i18n.py::PatchTests::test_build_parser_gains_lang_flag": true,
-  "tests/test_i18n.py::PatchTests::test_emit_wrapper_translates": true,
-  "tests/test_zzdbg.py::T::test_3": true
-}
