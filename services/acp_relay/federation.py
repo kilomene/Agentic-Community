@@ -52,7 +52,8 @@ import time
 
 from acp_crypto import (ed25519_sign, ed25519_verify,
                         generate_ed25519_keypair)
-from acp_proto import b62encode, b62decode, canonical
+from acp_proto import (b62encode, b62decode, b62encode_fixed,
+                        b62decode_fixed, canonical)
 
 MAX_FRAME = 4 * 1024 * 1024
 LINK_FRESHNESS_S = 300      # relay_link / relay_link_accept ts window
@@ -119,7 +120,7 @@ def verify_forwarded_frame(obj):
         raise ValueError("need exactly one of payload/box")
     vkey = vkey_from_pid(obj["from"])
     try:
-        sig = b62decode(obj["sig"])
+        sig = b62decode_fixed(obj["sig"])
     except (ValueError, KeyError, TypeError):
         raise ValueError("bad sig encoding")
     unsigned = {k: v for k, v in obj.items() if k != "sig"}
@@ -366,7 +367,7 @@ class FederationManager:
             raise FederationError("%s: relay not in allowlist" % what)
         try:
             vkey = vkey_from_pid(rid)
-            sigb = b62decode(sig)
+            sigb = b62decode_fixed(sig)
         except (ValueError, KeyError, TypeError):
             raise FederationError("%s: bad sig encoding" % what)
         if not ed25519_verify(vkey, canonical({"relay_id": rid, "ts": ts}),
@@ -376,7 +377,7 @@ class FederationManager:
 
     def _signed(self, body):
         body = dict(body)
-        body["sig"] = b62encode(ed25519_sign(self._priv, canonical(
+        body["sig"] = b62encode_fixed(ed25519_sign(self._priv, canonical(
             {k: v for k, v in body.items() if k != "sig"})))
         return body
 
@@ -536,7 +537,7 @@ class FederationManager:
         if abs(int(time.time()) - ts) > ANNOUNCE_FRESHNESS_S:
             raise ValueError("stale ts")
         vkey = vkey_from_pid(link.relay_id)
-        sigb = b62decode(sig)
+        sigb = b62decode_fixed(sig)
         if not ed25519_verify(
                 vkey, canonical({"pid": pid, "relay_id": origin,
                                  "ts": ts}), sigb):
@@ -658,7 +659,7 @@ class FederationManager:
         envelope bytes are untouched (signatures stay verifiable)."""
         try:
             link.send_obj({"fed_forward": {"hops": int(hops),
-                                           "frame": b62encode(raw)}})
+                                           "frame": b62encode_fixed(raw)}})
             return True
         except (OSError, ValueError):
             self.link_closed(link)
@@ -677,7 +678,7 @@ class FederationManager:
                     {"reason": "hop_limit", "hops": hops,
                      "from": link.relay_id})
                 return
-            raw = b62decode(ff.get("frame") or "")
+            raw = b62decode_fixed(ff.get("frame") or "")
             env = verify_forwarded_frame(
                 json.loads(raw.decode("utf-8")))
             target = env["to"]
