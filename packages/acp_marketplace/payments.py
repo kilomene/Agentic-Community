@@ -33,7 +33,6 @@ Real-adapter interface spec (for a future implementer):
     all amounts are integer minor units (cents); currency is ISO-4217.
 """
 import os
-import time
 
 from acp_proto import AcpError
 
