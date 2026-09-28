@@ -1,0 +1,270 @@
+"""Chunked E2E file transfer.
+
+Sender: FILE_OFFER -> wait FILE_ACCEPT/FILE_REJECT -> stream FILE_CHUNK
+(32 KiB, b62-encoded) -> FILE_DONE -> wait FILE_ACK.
+
+Receiver: permission check (sender needs 'send_file', else FILE_REJECT
+POLICY_DENIED + audit) -> size cap -> accept policy / on_file_offer
+callback -> reassemble into home_dir/incoming/<file_id>.part -> on
+FILE_DONE verify whole-file SHA-256 -> move to
+home_dir/incoming/<sanitized name> -> FILE_ACK. Hash mismatch sends
+ERROR(FILE_HASH_MISMATCH) and the partial file is never promoted.
+
+Deviation from docs/PROTOCOL.md section 8: the acp_proto FILE_CHUNK
+schema carries no per-chunk sha256, so per-chunk verification is not
+possible; integrity rests on the whole-file SHA-256 at FILE_DONE (plus
+the E2E AEAD on every chunk frame).
+"""
+import hashlib
+import hmac
+import os
+import threading
+import time
+
+from acp_proto import (
+    AcpError, b62encode, b62decode,
+    FILE_OFFER, FILE_ACCEPT, FILE_REJECT, FILE_CHUNK, FILE_DONE, FILE_ACK,
+    ERROR,
+)
+
+CHUNK_SIZE = 32768
+ACCEPT_TIMEOUT = 60
+FINISH_TIMEOUT = 60
+
+
+def sanitize_filename(name):
+    """Return a safe basename, or None if the name is hostile."""
+    if not isinstance(name, str):
+        return None
+    base = name.replace("\\", "/").split("/")[-1].strip().strip(".").strip()
+    if not base or len(base.encode("utf-8")) > 255:
+        return None
+    if "\x00" in base or any(ord(ch) < 32 for ch in base):
+        return None
+    safe = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in base)
+    safe = safe.strip("._")
+    return safe or None
+
+
+def _unique_path(path):
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(path)
+    i = 1
+    while True:
+        cand = f"{root}_{i}{ext}"
+        if not os.path.exists(cand):
+            return cand
+        i += 1
+
+
+class FileTransfer:
+    def __init__(self, connector):
+        self._c = connector
+        self._lock = threading.Lock()
+        self._waiters = {}  # file_id -> dict of Events/flags
+        self._offer_cb = None
+
+    def on_file_offer(self, cb):
+        """cb(sender_pid, name, size, sha256) -> bool (accept?)."""
+        self._offer_cb = cb
+
+    # ---------------------------------------------------------------- sender
+    def send_file(self, peer_pid, path):
+        c = self._c
+        c._require_peer(peer_pid)
+        if not os.path.isfile(path):
+            raise AcpError("INTERNAL", f"not a file: {path}")
+        size = os.path.getsize(path)
+        c.policy.check_file_size(size)
+        with open(path, "rb") as f:
+            data = f.read()
+        digest = hashlib.sha256(data).hexdigest()
+        count = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        file_id = os.urandom(16).hex()
+        name = os.path.basename(path)
+        waiter = {"accept": threading.Event(), "accepted": None,
+                  "reason": "", "done": threading.Event()}
+        with self._lock:
+            self._waiters[file_id] = waiter
+        try:
+            c.store.add_transfer(file_id, "out", peer_pid, name, size,
+                                 digest, CHUNK_SIZE, count, "offered", None,
+                                 int(time.time()))
+            c._send_e2e(FILE_OFFER, peer_pid,
+                        {"file_id": file_id, "name": name, "size": size,
+                         "sha256": digest, "chunks": count})
+            if not waiter["accept"].wait(ACCEPT_TIMEOUT):
+                c.store.update_transfer(file_id, state="failed")
+                raise AcpError("INTERNAL",
+                               f"no FILE_ACCEPT for {file_id}"
+                               f" within {ACCEPT_TIMEOUT}s")
+            if not waiter["accepted"]:
+                c.store.update_transfer(file_id, state="cancelled")
+                raise AcpError("FILE_REJECTED",
+                               waiter["reason"] or "rejected by peer")
+            c.store.update_transfer(file_id, state="active")
+            for i in range(count):
+                chunk = data[i * CHUNK_SIZE:(i + 1) * CHUNK_SIZE]
+                c._send_e2e(FILE_CHUNK, peer_pid,
+                            {"file_id": file_id, "index": i,
+                             "data": b62encode(chunk)})
+            c._send_e2e(FILE_DONE, peer_pid, {"file_id": file_id})
+            if not waiter["done"].wait(FINISH_TIMEOUT):
+                c.store.update_transfer(file_id, state="failed")
+                raise AcpError("INTERNAL",
+                               f"no FILE_ACK for {file_id}"
+                               f" within {FINISH_TIMEOUT}s")
+            c.store.update_transfer(file_id, state="done")
+            c.audit.log("file.sent", actor=peer_pid, target=file_id,
+                        result="ok",
+                        details={"name": name, "size": size,
+                                 "sha256": digest})
+            return file_id
+        finally:
+            with self._lock:
+                self._waiters.pop(file_id, None)
+
+    # --------------------------------------------------------------- receiver
+    def handle_offer(self, env, payload):
+        c = self._c
+        sender = env["from"]
+        file_id = payload["file_id"]
+        try:
+            c.permissions.check(sender, "send_file")
+        except AcpError as e:
+            self._reject(sender, file_id, "POLICY_DENIED", e)
+            return
+        try:
+            c.policy.check_file_size(payload["size"])
+        except AcpError as e:
+            self._reject(sender, file_id, "FILE_TOO_LARGE", e)
+            return
+        accept = c.policy.auto_accept(sender)
+        if self._offer_cb is not None:
+            try:
+                accept = bool(self._offer_cb(sender, payload["name"],
+                                             payload["size"],
+                                             payload["sha256"]))
+            except Exception as e:
+                c.audit.log("file.offer_callback_error", actor=sender,
+                            target=file_id, result="failed",
+                            details={"error": str(e)})
+                accept = False
+        if not accept:
+            self._reject(sender, file_id, "rejected by receiver", None)
+            return
+        safe = sanitize_filename(payload["name"]) or f"file_{file_id[:12]}"
+        part = os.path.join(c.incoming_dir, file_id + ".part")
+        with open(part, "wb"):
+            pass
+        c.store.add_transfer(file_id, "in", sender, safe, payload["size"],
+                             payload["sha256"], CHUNK_SIZE,
+                             payload["chunks"], "active", part,
+                             int(time.time()))
+        c.audit.log("file.offer_accepted", actor=sender, target=file_id,
+                    result="ok",
+                    details={"name": safe, "size": payload["size"]})
+        try:
+            c._send_e2e(FILE_ACCEPT, sender,
+                        {"file_id": file_id, "chunk_size": CHUNK_SIZE})
+        except AcpError as e:
+            c.store.update_transfer(file_id, state="failed")
+            c.audit.log("file.accept_failed", actor=sender, target=file_id,
+                        result="failed", details={"error": e.code})
+
+    def handle_chunk(self, env, payload):
+        c = self._c
+        t = c.store.get_transfer(payload["file_id"])
+        if t is None or t["direction"] != "in" or t["state"] != "active":
+            c.audit.log("file.stray_chunk", actor=env["from"],
+                        target=payload.get("file_id"), result="denied",
+                        details={})
+            return
+        try:
+            raw = b62decode(payload["data"])
+        except (ValueError, KeyError):
+            raise AcpError("BAD_ENVELOPE", "chunk data is not valid b62")
+        if len(raw) > CHUNK_SIZE + 1024:
+            raise AcpError("BAD_ENVELOPE", "chunk exceeds negotiated size")
+        with open(t["path"], "r+b") as f:
+            f.seek(payload["index"] * t["chunk_size"])
+            f.write(raw)
+        c.store.update_transfer(t["transfer_id"],
+                                received=t["received"] + 1)
+
+    def handle_done(self, env, payload):
+        c = self._c
+        t = c.store.get_transfer(payload["file_id"])
+        if t is None or t["direction"] != "in":
+            return
+        with open(t["path"], "rb") as f:
+            data = f.read()
+        digest = hashlib.sha256(data).hexdigest()
+        if (len(data) != t["size"]
+                or not hmac.compare_digest(digest, t["sha256"])):
+            c.store.update_transfer(t["transfer_id"], state="failed")
+            c.audit.log("file.hash_mismatch", actor=env["from"],
+                        target=t["transfer_id"], result="failed",
+                        details={"expected_size": t["size"],
+                                 "actual_size": len(data)})
+            try:
+                c._send_plain(ERROR, env["from"],
+                              {"code": "FILE_HASH_MISMATCH",
+                               "detail": t["transfer_id"]})
+            except AcpError:
+                pass
+            return
+        dest = _unique_path(os.path.join(c.incoming_dir, t["name"]))
+        os.replace(t["path"], dest)
+        c.store.update_transfer(t["transfer_id"], state="done", path=dest)
+        c.audit.log("file.received", actor=env["from"],
+                    target=t["transfer_id"], result="ok",
+                    details={"name": os.path.basename(dest),
+                             "size": len(data), "sha256": digest})
+        try:
+            c._send_e2e(FILE_ACK, env["from"],
+                        {"file_id": t["transfer_id"]})
+        except AcpError as e:
+            c.audit.log("file.ack_failed", actor=env["from"],
+                        target=t["transfer_id"], result="failed",
+                        details={"error": e.code})
+
+    # ---------------------------------------------------------- sender events
+    def handle_accept(self, env, payload):
+        with self._lock:
+            w = self._waiters.get(payload["file_id"])
+        if w is not None:
+            w["accepted"] = True
+            w["accept"].set()
+        else:
+            self._c.audit.log("file.stray_accept", actor=env["from"],
+                              target=payload.get("file_id"), result="ok",
+                              details={})
+
+    def handle_reject(self, env, payload):
+        with self._lock:
+            w = self._waiters.get(payload["file_id"])
+        if w is not None:
+            w["accepted"] = False
+            w["reason"] = payload.get("reason", "")
+            w["accept"].set()
+
+    def handle_ack(self, env, payload):
+        with self._lock:
+            w = self._waiters.get(payload["file_id"])
+        if w is not None:
+            w["done"].set()
+
+    # -------------------------------------------------------------- internal
+    def _reject(self, sender, file_id, reason, err):
+        c = self._c
+        c.audit.log("file.offer_rejected", actor=sender, target=file_id,
+                    result="denied",
+                    details={"reason": reason,
+                             "error": err.code if err else None})
+        try:
+            c._send_e2e(FILE_REJECT, sender,
+                        {"file_id": file_id, "reason": reason})
+        except AcpError:
+            pass
