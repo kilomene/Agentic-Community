@@ -38,8 +38,12 @@ def main(argv=None):
             reg = client.directory_register(api_url, args.handle)
             print("registered: %s" % reg)
 
-            client.directory_set_presence("online")
-            print("presence published: online")
+            # NOTE: presence publish is key-gated on the directory
+            # (needs an operator-issued API key with presence:write),
+            # so this example stops at register + resolve. With a key:
+            #   client.directory_register(api_url, args.handle,
+            #                             api_key="<key>")
+            #   client.directory_set_presence("online")
 
             found = client.directory_search(args.handle)
             assert found["ipub"] == client.peer_id, \
