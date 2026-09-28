@@ -3,7 +3,6 @@ import argparse
 import json
 import os
 import signal
-import subprocess
 import sys
 import time
 
@@ -30,7 +29,7 @@ def _pid_alive(pid):
 
 
 def cmd_status(args):
-    cfg, s = _cfg(), None
+    cfg = _cfg()
     s = _store(cfg)
     sup_pid = _read_pid(os.path.join(cfg["run_dir"], "supervisor.pid"))
     print(f"supervisor: {'RUNNING (pid %d)' % sup_pid if sup_pid and _pid_alive(sup_pid) else 'DOWN'}")
@@ -96,9 +95,14 @@ def cmd_logs(args):
         # also try logs dir directly
         path = os.path.join(cfg["base_dir"], "logs", name)
     try:
+        n = int(args.lines or 50)
+    except (TypeError, ValueError):
+        print(f"invalid --lines value: {args.lines!r}", file=sys.stderr)
+        return 1
+    try:
         with open(path) as f:
             lines = f.readlines()
-        for line in lines[-int(args.lines):]:
+        for line in lines[-n:] if n > 0 else []:
             print(line, end="")
     except OSError as e:
         print(f"no log {name}: {e}", file=sys.stderr)
@@ -191,9 +195,15 @@ def cmd_diagnostics(args):
         with open(jpath) as f:
             lines = f.readlines()
         for line in lines[-15:]:
-            e = json.loads(line)
-            print(time.strftime("%H:%M:%S", time.gmtime(e["ts"])), e["event"],
-                  e.get("task_id") or "")
+            # A crash can leave a torn last line — never let diagnostics
+            # die on the journal it is meant to inspect.
+            try:
+                e = json.loads(line)
+            except ValueError:
+                print("(unparseable journal line skipped)")
+                continue
+            print(time.strftime("%H:%M:%S", time.gmtime(e.get("ts", 0))),
+                  e.get("event", "?"), e.get("task_id") or "")
     except OSError:
         print("(no journal today)")
     s.close()
