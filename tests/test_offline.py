@@ -128,6 +128,58 @@ class MailboxRelayTests(unittest.TestCase):
     def tearDownClass(cls):
         relay_mod.graceful_shutdown(cls.server, cls.thread)
 
+    def test_control_frames_never_stored(self):
+        # Control frames (not envelopes) must never be stored, even for
+        # offline recipients.
+        from acp_crypto import ed25519_publickey
+        r_priv, _ = generate_ed25519_keypair()
+        r_pid = b62encode(ed25519_publickey(r_priv))
+        s_priv, _ = generate_ed25519_keypair()
+        sender, _ = relay_mod.RelayClient.connect("127.0.0.1", self.port,
+                                                  s_priv)
+        try:
+            # Send a control frame (ping) targeted at offline r_pid.
+            # The relay should not store it.
+            sender.send_json({"ping": {"to": r_pid}})
+            time.sleep(0.5)
+            mb = self.server.mailbox
+            self.assertEqual(mb.pending(r_pid), [])
+        finally:
+            sender.close()
+
+    def test_forged_frame_delivered_verbatim(self):
+        # A forged frame inserted directly into the mailbox must be
+        # delivered byte-identical so the recipient's own signature
+        # verification can reject it (defense in depth: the relay never
+        # re-signs or alters).
+        from acp_crypto import ed25519_publickey
+        import uuid
+        s_priv, _ = generate_ed25519_keypair()
+        r_priv, _ = generate_ed25519_keypair()
+        s_pid = b62encode(ed25519_publickey(s_priv))
+        r_pid = b62encode(ed25519_publickey(r_priv))
+        # Create a valid frame then tamper with the payload
+        env = make_envelope("msg", s_pid, r_pid,
+                            {"text": "legit", "msg_id": uuid.uuid4().hex},
+                            s_priv)
+        raw = bytearray(canonical(env))
+        # Flip a byte in the text (forgery)
+        raw = raw.replace(b"legit", b"FORGED")
+        raw = bytes(raw)
+        mb = self.server.mailbox
+        mb.store(r_pid, s_pid, "msg", raw)
+        # Recipient connects and gets the forged frame verbatim
+        recvr, _ = relay_mod.RelayClient.connect("127.0.0.1", self.port,
+                                                 r_priv)
+        try:
+            ids, frames = recvr.drain_mailbox(timeout=10)
+            self.assertEqual(len(ids), 1)
+            self.assertEqual(frames[0], raw)  # byte-identical
+            self.assertIn(b"FORGED", frames[0])
+            recvr.ack_mailbox(ids)
+        finally:
+            recvr.close()
+
     def test_offline_store_and_redeliver(self):
         # sender and recipient keys
         s_priv, _ = generate_ed25519_keypair()
