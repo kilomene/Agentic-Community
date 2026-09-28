@@ -30,6 +30,7 @@ from .store import Store
 from .identity import Identity
 from .audit import Audit
 from .transport import TcpTransport
+from .relay_link import RelayLink
 from .policy import PolicyEngine
 from .permissions import Permissions, PERMS
 from .pairing import PairingManager
@@ -81,6 +82,9 @@ class Connector:
 
         self._conns = {}  # pid -> Conn
         self._conns_lock = threading.Lock()
+        self._relay_link = None  # RelayLink to a wss:// relay (shared)
+        self._relay_queued = []  # [(to_pid, mailbox_id, ts)] FIFO notices
+        self._relay_queued_lock = threading.Lock()
         self._ext_handlers = {}  # V2+ kind -> fn(conn, env, payload)
         self._replay = collections.OrderedDict()
         self._replay_lock = threading.Lock()
@@ -117,6 +121,42 @@ class Connector:
                        details={"host": host, "port": actual})
         return actual
 
+    def relay_connect(self, url):
+        """Connect to a WebSocket ACP relay (e.g. wss://host/path).
+
+        Holds one persistent outbound link; the relay routes envelopes
+        by ``to`` pid, so agents behind NAT can reach each other. The
+        link is shared: _get_conn falls back to it when no direct
+        connection exists. Returns the RelayLink. Works with or without
+        the TCP server running.
+        """
+        link = RelayLink(self)
+        link.connect(url)
+        self._relay_link = link
+        self._spawn_reader(link)
+        self.audit.log("relay.connected", result="ok",
+                       details={"url": url})
+        return link
+
+    def _on_relay_queued(self, to_pid, mailbox_id):
+        """The relay stored an envelope for to_pid in its mailbox.
+        Called from the RelayLink reader thread; never raises."""
+        try:
+            with self._relay_queued_lock:
+                self._relay_queued.append(
+                    (to_pid, mailbox_id, int(time.time())))
+        except Exception:
+            pass
+
+    def _pop_relay_queued(self, to_pid):
+        """Pop the oldest queued notice for to_pid, or None."""
+        with self._relay_queued_lock:
+            for i, (pid, mbx_id, _ts) in enumerate(self._relay_queued):
+                if pid == to_pid:
+                    del self._relay_queued[i]
+                    return mbx_id
+        return None
+
     def stop(self):
         self._stopping = True
         self.audit.log("connector.stopped", result="ok", details={})
@@ -128,6 +168,13 @@ class Connector:
             self.transport.stop()
         except Exception:
             pass
+        link = self._relay_link
+        self._relay_link = None
+        if link is not None:
+            try:
+                link.close()
+            except Exception:
+                pass
         with self._conns_lock:
             conns = list(self._conns.values())
             self._conns.clear()
@@ -177,7 +224,11 @@ class Connector:
         with self._conns_lock:
             old = self._conns.get(pid)
             self._conns[pid] = conn
-        if old is not None and old is not conn:
+        # Never close the shared relay link here: other pids still route
+        # through it. Rebinding one pid to a direct conn just replaces
+        # that pid's entry.
+        if old is not None and old is not conn \
+                and old is not self._relay_link:
             try:
                 old.close()
             except Exception:
@@ -190,7 +241,9 @@ class Connector:
     def _drop_conn(self, pid):
         with self._conns_lock:
             conn = self._conns.pop(pid, None)
-        if conn is not None:
+        # The relay link is shared across pids: dropping one pid must
+        # not close it for everyone else.
+        if conn is not None and conn is not self._relay_link:
             try:
                 conn.close()
             except Exception:
@@ -217,6 +270,12 @@ class Connector:
                 self._bind_conn(pid, conn)
                 self._spawn_reader(conn)
                 return conn
+        # Relay fallback: one shared link routes by ``to`` pid, so no
+        # per-pid binding is needed (and must NOT be created — the link
+        # is shared). A closed link is skipped via its .closed flag.
+        link = self._relay_link
+        if link is not None and not link.closed:
+            return link
         raise AcpError("INTERNAL", f"no open connection to peer"
                                    f" {pid[:16] if isinstance(pid, str) else pid}")
 
@@ -433,6 +492,10 @@ class Connector:
     # ---------------------------------------------------------------- pairing
     def pair_initiate(self, host, port):
         return self.pairing.pair_initiate(host, port)
+
+    def pair_initiate_relay(self, peer_pid):
+        """Start pairing with a peer reachable via the relay (no dial)."""
+        return self.pairing.pair_initiate_relay(peer_pid)
 
     def on_pairing_request(self, cb):
         self.pairing.on_pairing_request(cb)
