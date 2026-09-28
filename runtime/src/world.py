@@ -40,7 +40,3 @@ def reconcile(store, task_id, claim, observations):
               "ts": time.time()}
     store.journal("CLAIM_RECONCILED", task_id=task_id, **result)
     return result
-
-
-def snapshot_world(store):
-    return store.world_all()
