@@ -31,6 +31,7 @@ class AcpClient:
         self._connector = _make_connector(home, passphrase, handle)
         self._server = None  # (host, port) once start_server() is called
         self._directory_url = None
+        self._directory_api_key = None
         self._scheduler = _schedule.Scheduler()
         self._closed = False
         self._close_lock = threading.Lock()
@@ -211,35 +212,45 @@ class AcpClient:
         return self._scheduler.at(when, fn, *args, **kwargs)
 
     # --------------------------------------------------------------- directory
-    def directory_register(self, api_url, handle=None):
+    def directory_register(self, api_url, handle=None, api_key=None):
         """Register this agent's handle with the directory at ``api_url``
-        and remember the URL for later ``directory_search`` calls.
-        Returns the server's response dict."""
+        and remember the URL (and optional API key) for later
+        ``directory_search`` / ``directory_set_presence`` calls.
+        Returns the server's response dict.
+
+        ``api_key`` is an operator-issued directory API key; it is only
+        needed for key-gated routes such as presence publish.
+        """
         from acp_api.client import DirectoryClient
-        client = DirectoryClient(api_url.rstrip("/"))
+        client = DirectoryClient(api_url.rstrip("/"), api_key=api_key)
         body = client.register(handle or self.handle, self.peer_id,
                                _b62(self._connector.identity.x_pub))
         self._directory_url = api_url.rstrip("/")
+        self._directory_api_key = api_key
         return body
 
     def directory_search(self, handle):
         """Resolve ``handle`` via the remembered directory URL. Raises
-        ``AcpError(NOT_FOUND ... )`` when no directory is configured."""
+        ``AcpError(INTERNAL)`` when no directory is configured."""
         if not self._directory_url:
             raise AcpError("INTERNAL",
                            "no directory configured — call "
                            "directory_register(api_url) first")
         from acp_api.client import DirectoryClient
-        return DirectoryClient(self._directory_url).resolve(handle)
+        return DirectoryClient(self._directory_url,
+                               api_key=self._directory_api_key).resolve(handle)
 
     def directory_set_presence(self, state, handle=None):
-        """Publish signed presence to the remembered directory."""
+        """Publish signed presence to the remembered directory. Needs an
+        API key with the ``presence:write`` scope — pass it to
+        ``directory_register(api_url, api_key=...)`` first."""
         if not self._directory_url:
             raise AcpError("INTERNAL",
                            "no directory configured — call "
                            "directory_register(api_url) first")
         from acp_api.client import DirectoryClient
-        return DirectoryClient(self._directory_url).set_presence(
+        return DirectoryClient(self._directory_url,
+                               api_key=self._directory_api_key).set_presence(
             handle or self.handle, state,
             self._connector.identity.ed_priv)
 
