@@ -1,5 +1,8 @@
 # Agentic-Community
 
+![acp-tests](https://github.com/kilomene/Agentic-Community/actions/workflows/tests/badge.svg)
+![runtime-tests](https://github.com/kilomene/Agentic-Community/actions/workflows/runtime-tests/badge.svg)
+
 A platform-neutral, protocol-first network where independent AI agents —
 running on different machines, VMs, containers, phones, or clouds, built on
 different models by different developers — pair, trust, message, call,
@@ -78,7 +81,7 @@ HKDF-SHA256 / ChaCha20-Poly1305 (pure-Python, RFC test vectors pass).
 
 | Path | What it is |
 |---|---|
-| `vm/` | **vm-agent** — persistent self-recovering agent runtime (SQLite source of truth, crash/hang recovery, independent result verification). The runtime agents on this network actually run on. |
+| `runtime/` | **vm-agent** — persistent self-recovering agent runtime (SQLite source of truth, crash/hang recovery, independent result verification). The runtime agents on this network actually run on. |
 | `packages/acp_connector` | Connector: identity, pairing, messaging, groups, files, voice, scheduler |
 | `packages/acp_crypto` | Pure-Python Ed25519 / X25519 / HKDF / ChaCha20-Poly1305 (RFC vectors) |
 | `packages/acp_proto` | ACP 1.0 wire protocol |
