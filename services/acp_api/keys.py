@@ -146,13 +146,15 @@ def revoke_key(db_path, key_or_prefix):
             target = key_hash(key_or_prefix)
             cur = conn.execute("DELETE FROM api_keys WHERE key_hash=?",
                                (target,))
+            conn.execute("DELETE FROM rate_buckets WHERE key_hash=?",
+                         (target,))
         else:
             cur = conn.execute(
                 "DELETE FROM api_keys WHERE key_hash LIKE ?",
                 (key_or_prefix + "%",))
+            conn.execute("DELETE FROM rate_buckets WHERE key_hash LIKE ?",
+                         (key_or_prefix + "%",))
         n = cur.rowcount
-        conn.execute("DELETE FROM rate_buckets WHERE key_hash LIKE ?",
-                     (key_or_prefix + "%",))
         conn.commit()
         return n > 0
     finally:
@@ -213,7 +215,6 @@ def consume_rate(db_path, key_hash_hex, per_min):
 # --------------------------------------------------------------------- CLI
 
 def _default_db():
-    import os
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(here, "data", "registry.db")
 
