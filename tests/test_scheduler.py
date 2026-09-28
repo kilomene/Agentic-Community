@@ -176,29 +176,39 @@ class SchedulerTests(unittest.TestCase):
             c.stop()
 
     def test_scheduled_send_message(self):
-        # Two connectors, scheduled send_message delivers.
+        # Two paired connectors: a real send_message scheduled through
+        # the scheduler must deliver over the wire.
         home1 = tempfile.mkdtemp(prefix="acp-sched-a-")
         home2 = tempfile.mkdtemp(prefix="acp-sched-b-")
         c1 = Connector(home1, "pass-one", handle="a")
         c2 = Connector(home2, "pass-two", handle="b")
         try:
             port2 = c2.start_server("127.0.0.1", 0)
-            # pair them (simplified: direct peer add)
-            # For this test we use the transport directly.
             got = []
             ev = threading.Event()
-            c2.on_message(lambda s, t, m: (got.append((s, t)), ev.set()))
-            # Connect c1 -> c2 and send via scheduler
-            # (pairing is complex; we test the scheduler action path
-            # by calling send_message through the scheduler with a
-            # pre-established peer - here we just verify the action
-            # resolves and attempts delivery)
-            c1.scheduler.register_action("noop", lambda: None)
-            # The real send_message test needs pairing; we verify the
-            # scheduler can invoke the builtin without error.
-            tid = c1.scheduler.schedule_once(time.time() + 1, "noop", [])
+            c2.on_message(lambda s, t, m: (got.append(t), ev.set()))
+            # pair c1 -> c2 with the real handshake
+            sessions = []
+            ev2 = threading.Event()
+            c2.on_pairing_request(lambda s: (sessions.append(s),
+                                             ev2.set()))
+            s1 = c1.pair_initiate("127.0.0.1", port2)
+            assert ev2.wait(30), "responder never got pair_request"
+            s2 = sessions[0]
+            s2.accept()
+            wait_until(lambda: s1.state == "await_code", what="challenge")
+            s1.confirm(s2.code)
+            wait_until(lambda: s1.state == "done" and s2.state == "done",
+                       what="pairing completion")
+            # schedule the builtin send_message 1 s out
+            text = "scheduled hello"
+            tid = c1.scheduler.schedule_once(time.time() + 1,
+                                             "send_message",
+                                             [c2.peer_id, text])
             self.assertTrue(tid)
-            time.sleep(2)
+            self.assertTrue(ev.wait(30),
+                            "scheduled message never delivered")
+            self.assertEqual(got[0], text)
         finally:
             c1.stop()
             c2.stop()
