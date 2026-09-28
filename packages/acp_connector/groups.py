@@ -520,6 +520,10 @@ class GroupChat:
                 return  # idempotent re-delivery
             now = int(time.time())
             members = payload["members"]
+            if not isinstance(members, list) or not all(
+                    isinstance(m, str) for m in members):
+                raise AcpError("BAD_ENVELOPE", "group_create members not a"
+                                               " list of peer ids")
             if sender not in members:
                 members = [sender] + members
             with c.store._lock:
@@ -541,7 +545,10 @@ class GroupChat:
         c = self._c
         sender = env["from"]
         group_id = payload["group_id"]
-        epoch = int(payload["epoch"])
+        try:
+            epoch = int(payload["epoch"])
+        except (ValueError, TypeError):
+            raise AcpError("BAD_ENVELOPE", "group_key epoch not an integer")
         try:
             key = b62decode_fixed(payload["key"])
         except (ValueError, KeyError, AttributeError):
@@ -578,8 +585,13 @@ class GroupChat:
         c = self._c
         sender = env["from"]
         group_id = payload["group_id"]
-        epoch = int(payload["epoch"])
-        seq = int(payload["seq"])
+        try:
+            epoch = int(payload["epoch"])
+            seq = int(payload["seq"])
+        except (ValueError, TypeError):
+            raise AcpError("BAD_ENVELOPE", "group_msg epoch/seq not integers")
+        if epoch < 0 or seq < 0:
+            raise AcpError("BAD_ENVELOPE", "group_msg epoch/seq negative")
         with self._lock:
             g = self._get_group(group_id)
             if g is None:
@@ -611,12 +623,15 @@ class GroupChat:
             try:
                 pt = aead_decrypt(key, nonce, ct, aad)
                 inner = json.loads(pt.decode("utf-8"))
+                if not isinstance(inner, dict):
+                    raise ValueError("inner payload not a dict")
+                inner_seq = int(inner.get("seq", -1))
             except Exception:
                 c.audit.log("group.msg_decrypt_fail", actor=sender,
                             target=group_id, result="denied",
                             details={"epoch": epoch, "seq": seq})
                 return
-            if inner.get("sender") != sender or int(inner.get("seq", -1)) != seq:
+            if inner.get("sender") != sender or inner_seq != seq:
                 c.audit.log("group.msg_inner_mismatch", actor=sender,
                             target=group_id, result="denied",
                             details={"seq": seq})
@@ -689,6 +704,10 @@ class GroupChat:
                     return
                 now = int(time.time())
                 members = payload.get("members") or []
+                if not isinstance(members, list) or not all(
+                        isinstance(m, str) for m in members):
+                    raise AcpError("BAD_ENVELOPE", "group_member_add members"
+                                                   " not a list of peer ids")
                 if sender not in members:
                     members = [sender] + members
                 with c.store._lock:
