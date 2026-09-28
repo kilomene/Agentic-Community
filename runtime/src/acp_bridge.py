@@ -37,11 +37,10 @@ Ops (op -> args):
                                                   package; validate task.json
   stop            {passphrase}                    shut the connector down
 """
-import base64
 import hashlib
 import json
 import os
-import shutil
+import re
 import sys
 import threading
 import time
@@ -205,15 +204,17 @@ class AcpBridge:
     def _op_serve(self, args, passphrase, home):
         c = self._connector(passphrase, home=home)
         home = c.home
+        host = args.get("host", "127.0.0.1")
+        port = int(args.get("port", 0))
+        # Check, bind, and register under one lock: two concurrent serve
+        # calls for the same home must not both bind a server (the loser
+        # would leak a listener nobody can reach).
         with self._lock:
             if home in self._serving:
                 host, port = self._serving[home]
                 return {"host": host, "port": port, "already": True}
-        host = args.get("host", "127.0.0.1")
-        port = int(args.get("port", 0))
-        actual = self._wrap(lambda: c.start_server(host, port),
-                            "acp serve")
-        with self._lock:
+            actual = self._wrap(lambda: c.start_server(host, port),
+                                "acp serve")
             self._serving[home] = (host, actual)
         return {"host": host, "port": actual, "already": False}
 
@@ -388,8 +389,18 @@ class AcpBridge:
                 files[p] = f.read()
         self._wrap(lambda: manifestmod.verify_package_files(manifest, files),
                    "market package file hashes")
-        dest = os.path.join(self.acp_home, "installs",
-                            f"{manifest['name']}-{manifest['version']}")
+        # The signature proves a trusted peer signed this manifest, not
+        # that name/version are safe path components — validate them
+        # strictly and keep the install inside the quarantine dir.
+        name, version = manifest["name"], manifest["version"]
+        if not isinstance(name, str) or not isinstance(version, str) or \
+                not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", name) or \
+                not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", version):
+            raise AcpBridgeError("unsafe package name/version")
+        installs = os.path.realpath(os.path.join(self.acp_home, "installs"))
+        dest = os.path.realpath(os.path.join(installs, f"{name}-{version}"))
+        if os.path.commonpath([installs, dest]) != installs:
+            raise AcpBridgeError("refusing to install outside installs dir")
         os.makedirs(dest, exist_ok=True)
         for p, data in files.items():
             with open(os.path.join(dest, p), "wb") as f:
