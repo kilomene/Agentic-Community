@@ -159,7 +159,7 @@ def alice_x_pub():
 
 # ------------------------------------------------------------------ 1. forge
 @case("1. forged signature -> INVALID_SIG")
-def t_forged_signature():
+def test_forged_signature():
     env = make_e2e_envelope(
         MSG, alice.peer_id, bob.peer_id,
         {"text": "legit", "msg_id": "m-forge-1"},
@@ -189,7 +189,7 @@ def t_forged_signature():
 
 # ------------------------------------------------------------------ 2. replay
 @case("2. replay -> REPLAY, no duplicate delivery")
-def t_replay():
+def test_replay():
     msg_id = "m-replay-" + os.urandom(4).hex()
     env = make_e2e_envelope(
         MSG, alice.peer_id, bob.peer_id,
@@ -222,7 +222,7 @@ def t_replay():
 
 # ---------------------------------------------------------- 3. wrong code
 @case("3. wrong pairing code -> PAIRING_FAILED, no peer stored")
-def t_wrong_code():
+def test_wrong_code():
     hd, he = make_home("acp-atk-d-"), make_home("acp-atk-e-")
     dave = Connector(hd, "atk-pass-d", handle="atk-dave")
     erin = Connector(he, "atk-pass-e", handle="atk-erin")
@@ -255,7 +255,7 @@ def t_wrong_code():
 
 # ---------------------------------------------------------- 4. MITM keys
 @case("4. MITM key substitution -> handshake fails, nobody trusted")
-def t_mitm():
+def test_mitm():
     hf, hg = make_home("acp-atk-f-"), make_home("acp-atk-g-")
     frank = Connector(hf, "atk-pass-f", handle="atk-frank")
     grace = Connector(hg, "atk-pass-g", handle="atk-grace")
@@ -330,7 +330,7 @@ def t_mitm():
 
 # ---------------------------------------------------------- 5. chunk tamper
 @case("5. tampered file chunk -> FILE_HASH_MISMATCH, file not delivered")
-def t_chunk_tamper():
+def test_chunk_tamper():
     content = b"ACP-ATTACK-PAYLOAD:" * 4096  # 77824 bytes -> 3 chunks
     src = os.path.join(home_a, "attack.bin")
     with open(src, "wb") as f:
@@ -384,7 +384,10 @@ def t_chunk_tamper():
             r = bob.store.get_transfer(fid)
             return r is not None and r["state"] == "failed"
 
-        assert wait_until(failed, timeout=45,
+        # The receiver-side verdict is what we assert. Generous timeout:
+        # every frame costs a pure-Python Ed25519 verify, so a loaded
+        # runner needs headroom here.
+        assert wait_until(failed, timeout=120,
                           what="receiver hash-mismatch verdict")
         assert tampered["done"], "no chunk was tampered"
         # receiver reported FILE_HASH_MISMATCH and kept the file quarantined
@@ -417,7 +420,7 @@ def _send_file_catch():
 
 # ---------------------------------------------------------- 6. escalation
 @case("6. permission escalation -> POLICY_DENIED + audit entry")
-def t_permission_escalation():
+def test_permission_escalation():
     # bob holds only the default pairing grants: no family_read
     assert not alice.permissions.has(bob.peer_id, "family_read"), \
         "precondition broken: bob already has family_read"
@@ -432,7 +435,7 @@ def t_permission_escalation():
 
 # ---------------------------------------------------------- 7. expired
 @case("7. expired envelope -> EXPIRED")
-def t_expired():
+def test_expired():
     env = make_envelope(PRESENCE, alice.peer_id, bob.peer_id,
                         {"state": "online"}, alice.identity.ed_priv,
                         ts=int(time.time()) - 3600)
@@ -448,7 +451,7 @@ def t_expired():
 
 # ---------------------------------------------------------- 8. unknown sender
 @case("8. unknown sender -> UNKNOWN_SENDER")
-def t_unknown_sender():
+def test_unknown_sender():
     u_priv, u_pub = generate_ed25519_keypair()
     u_pid = b62encode(u_pub)
     env = make_envelope(PRESENCE, u_pid, bob.peer_id, {"state": "online"},
@@ -461,7 +464,7 @@ def t_unknown_sender():
 
 # ---------------------------------------------------------- 9. wrong recipient
 @case("9. E2E to wrong recipient -> DECRYPT_FAIL")
-def t_wrong_recipient():
+def test_wrong_recipient():
     hc = make_home("acp-atk-c-")
     carol = Connector(hc, "atk-pass-c", handle="atk-carol")
     HOMES.append(hc)
@@ -518,7 +521,7 @@ def t_wrong_recipient():
 
 # ---------------------------------------------------------- 10. oversized
 @case("10. oversized file -> FILE_TOO_LARGE before transfer")
-def t_oversized_file():
+def test_oversized_file():
     alice.set_file_size_cap(1024)
     big = os.path.join(home_a, "big.bin")
     with open(big, "wb") as f:
@@ -545,7 +548,7 @@ def t_oversized_file():
 
 # ---------------------------------------------------------- 11. relay
 @case("11. relay sees metadata only; E2E box stays opaque")
-def t_relay_visibility():
+def test_relay_visibility():
     import relay as relay_mod  # noqa: E402
 
     server, thread = relay_mod.run("127.0.0.1", 0)
@@ -557,6 +560,15 @@ def t_relay_visibility():
             "127.0.0.1", port, bob.identity.ed_priv)
         try:
             assert pid_a == alice.peer_id and pid_b == bob.peer_id
+            # Hello frames are verified asynchronously on the server
+            # (pure-Python Ed25519), so wait for both peers to be
+            # registered before sending — otherwise the frame can be
+            # processed while the target is still "offline".
+            deadline = time.time() + 15
+            while server.peer_count() < 2 and time.time() < deadline:
+                time.sleep(0.05)
+            assert server.peer_count() == 2, \
+                "relay did not register both hello peers in time"
             # what a relay operator (or wire observer) sees:
             env = make_e2e_envelope(
                 MSG, alice.peer_id, bob.peer_id,
@@ -605,7 +617,7 @@ def t_relay_visibility():
 
 # ------------------------------------------------- 12. hostile file name
 @case("12. hostile file offer name -> contained in incoming/, sanitized")
-def t_hostile_filename():
+def test_hostile_filename():
     """A compromised peer hand-crafts a FILE_OFFER with a traversal name.
     The receiver must never write outside its incoming dir."""
     from acp_proto import FILE_OFFER  # noqa: E402
@@ -639,7 +651,7 @@ def t_hostile_filename():
 
 # ------------------------------------------- 13. manifest path traversal
 @case("13. marketplace manifest path traversal -> FILE_REJECTED")
-def t_manifest_traversal():
+def test_manifest_traversal():
     """An attacker hand-crafts a manifest (bypassing build_manifest) with
     a '../' file entry and a VALID signature. verify_manifest must reject
     it before the signature even matters."""
@@ -661,10 +673,10 @@ def t_manifest_traversal():
 
 
 def main():
-    fns = [t_forged_signature, t_replay, t_wrong_code, t_mitm,
-           t_chunk_tamper, t_permission_escalation, t_expired,
-           t_unknown_sender, t_wrong_recipient, t_oversized_file,
-           t_relay_visibility, t_hostile_filename, t_manifest_traversal]
+    fns = [test_forged_signature, test_replay, test_wrong_code, test_mitm,
+           test_chunk_tamper, test_permission_escalation, test_expired,
+           test_unknown_sender, test_wrong_recipient, test_oversized_file,
+           test_relay_visibility, test_hostile_filename, test_manifest_traversal]
     for fn in fns:
         name = fn._name
         t0 = time.time()
@@ -691,3 +703,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def teardown_module():
+    """Cleanup for pytest runs (the script entry point cleans up in main())."""
+    for c in CONNS:
+        try:
+            c.stop()
+        except Exception:
+            pass
+    for h in HOMES:
+        shutil.rmtree(h, ignore_errors=True)
