@@ -47,7 +47,7 @@ element and sign there; the bytes on the wire are identical either way.
 import time
 
 from acp_crypto import ed25519_sign, ed25519_verify
-from acp_proto import AcpError, b62encode, b62decode, canonical
+from acp_proto import AcpError, b62encode, b62decode_fixed, b62encode_fixed, canonical
 
 ATTESTATION_MAX_AGE = 300  # seconds
 
@@ -71,16 +71,16 @@ def sign_attestation(device_priv: bytes, agent_id: str, device_id: str,
     body = _attestation_body(agent_id, device_id, hw_model,
                              firmware_hash, ts)
     sig = ed25519_sign(device_priv, canonical(body))
-    return dict(body, device_sig=b62encode(sig))
+    return dict(body, device_sig=b62encode_fixed(sig))
 
 
 def sign_binding(agent_priv: bytes, agent_id: str,
                  device_pub: bytes, ts=None) -> dict:
     """Build an agent-signed binding dict (sigs b62-encoded)."""
     ts = int(time.time()) if ts is None else int(ts)
-    body = _binding_body(agent_id, b62encode(device_pub), ts)
+    body = _binding_body(agent_id, b62encode_fixed(device_pub), ts)
     sig = ed25519_sign(agent_priv, canonical(body))
-    return dict(body, agent_sig=b62encode(sig))
+    return dict(body, agent_sig=b62encode_fixed(sig))
 
 
 # -------------------------------------------------------------- verification
@@ -105,8 +105,8 @@ def check_attestation(attestation: dict, binding: dict,
 
     # 2. binding signature (agent identity key)
     try:
-        b_pub_raw = b62decode(binding["device_pub"])
-        b_sig = b62decode(binding["agent_sig"])
+        b_pub_raw = b62decode_fixed(binding["device_pub"])
+        b_sig = b62decode_fixed(binding["agent_sig"])
     except (KeyError, ValueError, AttributeError) as e:
         raise AcpError("BAD_ENVELOPE", "binding encoding invalid: %s" % e)
     b_body = _binding_body(binding["agent_id"], binding["device_pub"],
@@ -125,7 +125,7 @@ def check_attestation(attestation: dict, binding: dict,
 
     # 4. attestation signature (device key)
     try:
-        a_sig = b62decode(attestation["device_sig"])
+        a_sig = b62decode_fixed(attestation["device_sig"])
     except (KeyError, ValueError, AttributeError) as e:
         raise AcpError("BAD_ENVELOPE",
                        "attestation encoding invalid: %s" % e)
