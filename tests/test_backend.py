@@ -29,6 +29,7 @@ from acp_proto import (  # noqa: E402
 
 import server as api_server  # noqa: E402
 from client import DirectoryClient, DirectoryError  # noqa: E402
+from keys import create_key as _create_api_key  # noqa: E402
 import relay as relay_mod  # noqa: E402
 from relay import RelayClient  # noqa: E402
 
@@ -52,7 +53,15 @@ class ApiDirectoryTests(unittest.TestCase):
         db_path = os.path.join(cls.tmp, "registry.db")
         cls.server, cls.thread = api_server.run(API_HOST, API_PORT,
                                                 db_path=db_path)
-        cls.client = DirectoryClient("http://%s:%d" % (API_HOST, API_PORT))
+        # POST /v1/presence is key-gated (scope presence:write); the
+        # directory client carries the operator-issued key.
+        raw, _ = _create_api_key(
+            db_path, name="test",
+            scopes=["registry:read", "listings:write", "presence:write",
+                    "analytics:read", "analytics:write", "verify:request"],
+            per_min=100000)
+        cls.client = DirectoryClient("http://%s:%d" % (API_HOST, API_PORT),
+                                     api_key=raw)
 
     @classmethod
     def tearDownClass(cls):
