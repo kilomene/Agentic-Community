@@ -18,6 +18,7 @@ from acp_connector import Connector, AcpError  # noqa: E402
 from acp_crypto import generate_ed25519_keypair  # noqa: E402
 from acp_proto import (  # noqa: E402
     ALL_KINDS, E2E_KINDS, b62encode, b62decode,
+    b62encode_fixed, b62decode_fixed,
 )
 from acp_hwagent import (  # noqa: E402
     HW_ATTEST, HW_ATTEST_CHALLENGE, HW_CAPABILITIES,
@@ -101,9 +102,9 @@ def test_forged_device_sig_fails(dev_and_agent):
         dev_and_agent
     attestation = dict(attestation)
     # attacker flips the device signature bytes
-    raw = bytearray(b62decode(attestation["device_sig"]))
+    raw = bytearray(b62decode_fixed(attestation["device_sig"]))
     raw[0] ^= 0xFF
-    attestation["device_sig"] = b62encode(bytes(raw))
+    attestation["device_sig"] = b62encode_fixed(bytes(raw))
     assert verify_attestation(attestation, binding, agent_pub,
                               expected_agent_id=agent_id) is False
     with pytest.raises(AcpError) as exc:
