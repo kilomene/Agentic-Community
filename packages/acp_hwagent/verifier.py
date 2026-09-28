@@ -27,7 +27,7 @@ import threading
 import time
 
 from acp_crypto import random_bytes
-from acp_proto import AcpError, b62decode
+from acp_proto import AcpError
 
 from . import HW_ATTEST, HW_ATTEST_CHALLENGE, HW_CAPABILITIES
 from .protocol import (ATTESTATION_MAX_AGE, check_attestation,
