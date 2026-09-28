@@ -118,6 +118,21 @@ CREATE TABLE IF NOT EXISTS audit_logs(
 );
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp);
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS scheduled_tasks(
+  task_id    TEXT PRIMARY KEY,
+  kind       TEXT NOT NULL,
+  action     TEXT NOT NULL,
+  args_json  TEXT NOT NULL,
+  sched_json TEXT NOT NULL,
+  next_run   INTEGER NOT NULL,
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  last_run   INTEGER,
+  last_result TEXT,
+  run_count  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sched_next
+  ON scheduled_tasks(enabled, next_run);
 """
 
 
@@ -495,3 +510,48 @@ class Store:
             self._db.execute("INSERT OR REPLACE INTO kv(key, value)"
                              " VALUES (?,?)", (key, value))
             self._db.commit()
+
+    # ----------------------------------------------------- scheduled tasks
+    def sched_add(self, task_id, kind, action, args_json, sched_json,
+                  next_run, created_at):
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO scheduled_tasks(task_id, kind, action,"
+                " args_json, sched_json, next_run, enabled, created_at,"
+                " last_run, last_result, run_count)"
+                " VALUES (?,?,?,?,?, ?,1,?, NULL,NULL,0)",
+                (task_id, kind, action, args_json, sched_json, next_run,
+                 created_at))
+            self._db.commit()
+
+    def sched_get(self, task_id):
+        with self._lock:
+            return _row(self._db.execute(
+                "SELECT * FROM scheduled_tasks WHERE task_id=?",
+                (task_id,)).fetchone())
+
+    def sched_list(self):
+        with self._lock:
+            return [_row(r) for r in self._db.execute(
+                "SELECT * FROM scheduled_tasks ORDER BY next_run ASC"
+            ).fetchall()]
+
+    def sched_update(self, task_id, **fields):
+        allowed = {"next_run", "enabled", "last_run", "last_result",
+                   "run_count"}
+        sets = [f"{k}=?" for k in fields if k in allowed]
+        if not sets:
+            return
+        with self._lock:
+            self._db.execute(
+                f"UPDATE scheduled_tasks SET {', '.join(sets)}"
+                " WHERE task_id=?",
+                [fields[k] for k in fields if k in allowed] + [task_id])
+            self._db.commit()
+
+    def sched_delete(self, task_id):
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM scheduled_tasks WHERE task_id=?", (task_id,))
+            self._db.commit()
+            return cur.rowcount > 0
