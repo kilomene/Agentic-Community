@@ -292,6 +292,7 @@ class VoiceCalls:
             raise
         c.audit.log("call.invited", actor=peer_pid, target=call_id,
                     result="ok", details={"codec": CODEC})
+        c._metric("call_placed")
         if not ev.wait(timeout):
             self._cleanup(call_id, "no_answer")
             raise AcpError("INTERNAL",
