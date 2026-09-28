@@ -22,7 +22,7 @@ import threading
 import time
 
 from acp_proto import (
-    AcpError, b62encode, b62decode,
+    AcpError, b62encode_fixed, b62decode_fixed,
     FILE_OFFER, FILE_ACCEPT, FILE_REJECT, FILE_CHUNK, FILE_DONE, FILE_ACK,
     ERROR,
 )
@@ -108,7 +108,7 @@ class FileTransfer:
                 chunk = data[i * CHUNK_SIZE:(i + 1) * CHUNK_SIZE]
                 c._send_e2e(FILE_CHUNK, peer_pid,
                             {"file_id": file_id, "index": i,
-                             "data": b62encode(chunk)})
+                             "data": b62encode_fixed(chunk)})
             c._send_e2e(FILE_DONE, peer_pid, {"file_id": file_id})
             if not waiter["done"].wait(FINISH_TIMEOUT):
                 c.store.update_transfer(file_id, state="failed")
@@ -182,7 +182,7 @@ class FileTransfer:
                         details={})
             return
         try:
-            raw = b62decode(payload["data"])
+            raw = b62decode_fixed(payload["data"])
         except (ValueError, KeyError):
             raise AcpError("BAD_ENVELOPE", "chunk data is not valid b62")
         if len(raw) > CHUNK_SIZE + 1024:
@@ -222,6 +222,7 @@ class FileTransfer:
                     target=t["transfer_id"], result="ok",
                     details={"name": os.path.basename(dest),
                              "size": len(data), "sha256": digest})
+        c._metric("file_completed")
         try:
             c._send_e2e(FILE_ACK, env["from"],
                         {"file_id": t["transfer_id"]})
