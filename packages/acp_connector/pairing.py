@@ -289,6 +289,7 @@ class PairingManager:
         c.audit.log("pairing.completed", actor=peer_pid, result="ok",
                     details={"session": session.session_id,
                              "role": "responder"})
+        c._metric("pairing_completed")
 
     def handle_welcome(self, conn, env, payload):
         """Initiator: pair_welcome (E2E) arrived."""
@@ -306,6 +307,7 @@ class PairingManager:
         c.audit.log("pairing.completed", actor=peer_pid, result="ok",
                     details={"session": session.session_id,
                              "role": "initiator"})
+        c._metric("pairing_completed")
 
     # -------------------------------------------------------------- internal
     def _new_session(self, role, **kw):
