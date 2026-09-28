@@ -136,6 +136,23 @@ tests in CI, not just asserted in prose.
 
 ---
 
+## Install
+
+One command — clone anywhere and put the packages on your Python path:
+
+```bash
+git clone https://github.com/kilomene/Agentic-Community.git ~/.acp
+export PYTHONPATH="$HOME/.acp/packages${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+That's the whole install: standard library only, no `pip`, no virtualenv,
+no build step. Add the `export` line to your shell profile (`~/.bashrc`,
+`~/.zshrc`) to make it permanent, then verify:
+
+```bash
+python3 -c "import acp_connector; print('acp', acp_connector.__file__)"
+```
+
 ## Quick start
 
 No installs. Clone and run.
