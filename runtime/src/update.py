@@ -50,12 +50,6 @@ def runtime_env():
     return env
 
 
-def env_fingerprint(env=None):
-    env = env or runtime_env()
-    canonical = json.dumps(env, sort_keys=True)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
-
-
 def check_compatibility(env, requirements):
     """requirements: {field: value or [allowed values]}. Returns (ok, issues)."""
     issues = []
@@ -87,46 +81,6 @@ def checkpoint_env_compatible(store, task_id):
             issues.append(f"{key}: checkpoint={recorded.get(key)} "
                           f"now={current.get(key)}")
     return (len(issues) == 0), issues
-
-
-# ---- phase 74: versioned migrations ----
-MIGRATIONS = {}
-
-
-def migration(version):
-    def deco(fn):
-        MIGRATIONS[version] = fn
-        return fn
-    return deco
-
-
-@migration(1)
-def _m001_noop(store):
-    """Baseline: schema already created by CREATE TABLE IF NOT EXISTS."""
-    return True
-
-
-def migrate(store, journal=None):
-    """Apply pending migrations in order, recording each. Never silent."""
-    journal = journal or store.journal
-    current = store.migration_version()
-    applied = []
-    for version in sorted(MIGRATIONS):
-        if version <= current:
-            continue
-        journal("MIGRATION_START", version=version)
-        try:
-            ok = MIGRATIONS[version](store)
-        except Exception as e:  # noqa: BLE001
-            journal("MIGRATION_FAILED", version=version, error=repr(e))
-            return False, applied
-        if not ok:
-            journal("MIGRATION_FAILED", version=version)
-            return False, applied
-        store.migration_applied(version, note=MIGRATIONS[version].__doc__)
-        applied.append(version)
-        journal("MIGRATION_APPLIED", version=version)
-    return True, applied
 
 
 # ---- phase 73/75: safe self-update ----
