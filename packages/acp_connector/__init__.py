@@ -319,12 +319,15 @@ class Connector:
             kind = env.get("kind")
             if kind not in ALL_KINDS:
                 raise AcpError("UNKNOWN_KIND", str(kind))
-            self.policy.check_rate(str(env.get("from") or "anon"))
             if kind in (PAIR_REQUEST, PAIR_CHALLENGE):
                 self._verify_bootstrap(env)
             else:
                 verify_envelope(env, self._get_pubkey)
             self._check_replay(env)
+            # Rate-limit on the *verified* sender id. Checking before
+            # signature verification would let an attacker burn another
+            # identity's rate bucket with a spoofed ``from`` field.
+            self.policy.check_rate(str(env.get("from") or "anon"))
             if kind in E2E_KINDS:
                 payload = self._open_e2e(env)
                 self._dispatch_e2e(conn, env, payload)
