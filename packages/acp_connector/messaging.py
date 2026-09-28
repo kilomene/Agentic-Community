@@ -55,6 +55,7 @@ class Messaging:
         c.store.update_message(msg_id, status="acked")
         c.audit.log("message.sent", actor=peer_pid, target=msg_id,
                     result="ok", details={"bytes": len(text.encode())})
+        c._metric("message_sent", nbytes=len(text.encode()))
         return msg_id
 
     # ------------------------------------------------------- inbound events
@@ -72,6 +73,8 @@ class Messaging:
             c.audit.log("message.received", actor=sender, target=msg_id,
                         result="ok",
                         details={"bytes": len(text.encode("utf-8"))})
+            c._metric("message_received",
+                      nbytes=len(text.encode("utf-8")))
             for cb in list(self._cbs):
                 try:
                     cb(sender, text, msg_id)
