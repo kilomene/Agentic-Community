@@ -95,24 +95,6 @@ def verify(store, base_dir, paths=None):
     return bad
 
 
-def is_protected_config(base_dir, path):
-    full = os.path.abspath(path)
-    base = os.path.abspath(base_dir)
-    if not full.startswith(base):
-        return False
-    rel = os.path.relpath(full, base)
-    return rel in PROTECTED_CONFIG
-
-
-def authorize_config_write(path, auth_token=None):
-    """Config writes need an out-of-band token; without it, refuse."""
-    if auth_token is None:
-        return False, f"config modification refused (no auth token): {path}"
-    # A real deployment validates the token against a secret store.
-    # Here: any non-empty token supplied out-of-band is accepted and logged.
-    return True, "config write authorized"
-
-
 # ---- Phase 61: configuration versioning and restoration ----
 def snapshot_config(store, base_dir, paths=None, note=""):
     """Version the current config files (content stored, not just hashes).
