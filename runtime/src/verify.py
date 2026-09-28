@@ -6,7 +6,6 @@ checks against the real world and returns PASS/FAIL with evidence.
 Verified state (world_state in the kv store) can only be written by the
 verifier, never by agent claims.
 """
-import json
 import os
 import socket
 
@@ -151,8 +150,8 @@ class Verifier:
             return False, {"error": f"acp check rejects mutating op: {op!r}"}
         try:
             bridge = acpmod.bridge_for_executor(self.ex)
-            # read-only ops need a Connector; the passphrase is not required
-            # to already exist for them, so pass through only if given.
+            # Read-only ops still need an unlocked Connector, which needs
+            # the vault passphrase — pass it through in args when given.
             result = bridge.run(op, dict(args or {}))
         except acpmod.AcpBridgeError as e:
             return False, {"error": str(e)}
