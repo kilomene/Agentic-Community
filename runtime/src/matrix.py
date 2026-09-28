@@ -221,10 +221,6 @@ def classify_failure(failure_kind):
     return classify_mod.classify(source, kind)
 
 
-def recovery_action(failure_kind):
-    return policy_for(failure_kind)["recovery"]
-
-
 def escalation_for(failure_kind):
     return policy_for(failure_kind)["escalation"]
 
