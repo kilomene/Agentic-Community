@@ -19,7 +19,7 @@ PASS = []
 FAIL = []
 
 
-def test(name):
+def case(name):
     def deco(fn):
         fn._name = name
         return fn
@@ -59,7 +59,7 @@ print(f"c1={c1.peer_id[:12]}... port={port1}  c2={c2.peer_id[:12]}... port={port
 
 
 # ---------------------------------------------------------------- pairing
-@test("1. pairing handshake")
+@case("1. pairing handshake")
 def t_pairing():
     sessions2 = []
     ev = threading.Event()
@@ -94,7 +94,7 @@ def t_pairing():
 
 
 # ---------------------------------------------------------------- messaging
-@test("2. E2E messaging with ack")
+@case("2. E2E messaging with ack")
 def t_messaging():
     got = []
     ev = threading.Event()
@@ -119,7 +119,7 @@ def t_messaging():
 
 
 # ---------------------------------------------------------------- presence
-@test("3. presence broadcast")
+@case("3. presence broadcast")
 def t_presence():
     c1.set_presence("online")
     wait_until(
@@ -131,7 +131,7 @@ def t_presence():
 
 
 # ------------------------------------------------------------------- files
-@test("4. file transfer with hash verification")
+@case("4. file transfer with hash verification")
 def t_file():
     content = b"ACP-TEST-PAYLOAD:" * 4096  # 69632 bytes -> 3 chunks
     src = os.path.join(home1, "send.bin")
@@ -160,7 +160,7 @@ def t_file():
 
 
 # ------------------------------------------------------------------ family
-@test("5. family visibility + permission gating")
+@case("5. family visibility + permission gating")
 def t_family():
     fam = c1.family_add("Test Mother", relation="mother", notes="n",
                         visible_to=[c2.peer_id])
@@ -181,7 +181,7 @@ def t_family():
 
 
 # ---------------------------------------------------------------- projects
-@test("6. projects/tasks with permission gating")
+@case("6. projects/tasks with permission gating")
 def t_projects():
     pr = c1.project_create("Test Project", notes="n")
     tk = c1.task_add(pr, "Do the thing", assignee_pid=c2.peer_id,
@@ -203,7 +203,7 @@ def t_projects():
 
 
 # ------------------------------------------------------------ key rotation
-@test("7. KEY_ROTATE keeps the channel alive")
+@case("7. KEY_ROTATE keeps the channel alive")
 def t_rotate():
     old_x = c2.store.get_peer(c1.peer_id)["x_pub"]
     c1.rotate_keys()
@@ -220,7 +220,7 @@ def t_rotate():
 
 
 # ------------------------------------------------------------------ revoke
-@test("8. revoke severs trust")
+@case("8. revoke severs trust")
 def t_revoke():
     c1.revoke_peer(c2.peer_id)
     wait_until(lambda: c2.store.get_peer(c1.peer_id)["revoked"] == 1,
