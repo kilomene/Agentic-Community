@@ -1,0 +1,5 @@
+{
+  "tests/test_attack.py::test": true,
+  "tests/test_connector.py::test": true,
+  "tests/test_zzdbg.py::T::test_3": true
+}
