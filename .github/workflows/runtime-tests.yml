@@ -3,8 +3,12 @@ name: runtime-tests
 on:
   push:
     branches: [main]
+    paths:
+      - 'runtime/**'
   pull_request:
     branches: [main]
+    paths:
+      - 'runtime/**'
 
 jobs:
   test:
