@@ -43,7 +43,28 @@ class Messaging:
         now = int(time.time())
         c.store.add_message(msg_id, c.peer_id, "direct", None, text, now,
                             "sent", now)
-        if not ev.wait(ACK_TIMEOUT):
+        # Wait for the peer's MSG_ACK — but if the relay reports the
+        # envelope was queued in the recipient's mailbox (peer offline),
+        # return early with a "queued" status instead of blocking the
+        # full timeout. The message is safe; delivery happens on
+        # reconnect and the late ACK (if any) is just logged as stray.
+        deadline = time.time() + ACK_TIMEOUT
+        mailbox_id = None
+        acked = False
+        while not acked and time.time() < deadline:
+            q = c._pop_relay_queued(peer_pid)
+            if q is not None:
+                mailbox_id = q
+                break
+            acked = ev.wait(0.5)
+        if mailbox_id is not None:
+            with self._lock:
+                self._waiters.pop(msg_id, None)
+            c.store.update_message(msg_id, status="queued")
+            c.audit.log("message.queued", actor=peer_pid, target=msg_id,
+                        result="ok", details={"mailbox_id": mailbox_id})
+            return msg_id
+        if not acked:
             with self._lock:
                 self._waiters.pop(msg_id, None)
             c.audit.log("message.ack_timeout", actor=peer_pid,
