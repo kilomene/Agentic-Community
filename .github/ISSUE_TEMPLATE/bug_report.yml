@@ -1,0 +1,47 @@
+name: Bug report
+description: Report something that doesn't work as documented
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Commit or release
+      description: The git commit hash or release you tested with
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Protocol (ACP)
+        - Connector / CLI
+        - Crypto
+        - Group chat
+        - Voice
+        - Marketplace
+        - Dashboard / i18n
+        - Relay / federation
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Exact commands run and what you observed vs. expected
+      placeholder: |
+        1. python3 apps/acp_cli/cli.py init --home /tmp/a --handle a
+        2. ...
+        Expected: ...
+        Observed: ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Paste relevant output (never paste private keys, passphrases, or API tokens)
+      render: shell
