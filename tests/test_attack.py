@@ -37,7 +37,7 @@ from acp_crypto import (  # noqa: E402
 )
 from acp_proto import (  # noqa: E402
     AcpError, MSG, PRESENCE, PAIR_CHALLENGE, FILE_CHUNK,
-    b62encode, b62decode, canonical,
+    b62encode, b62decode, b62encode_fixed, b62decode_fixed, canonical,
     make_envelope, make_e2e_envelope, verify_envelope,
     open_e2e_envelope, frame_envelope,
 )
@@ -168,9 +168,9 @@ def t_forged_signature():
     # attacker flips a byte inside the E2E box
     forged = dict(env)
     box = dict(env["box"])
-    raw = bytearray(b62decode(box["ct"]))
+    raw = bytearray(b62decode_fixed(box["ct"]))
     raw[len(raw) // 2] ^= 0x01
-    box["ct"] = b62encode(bytes(raw))
+    box["ct"] = b62encode_fixed(bytes(raw))
     forged["box"] = box
     expect_acp_error(lambda: verify_envelope(forged, bob._get_pubkey),
                      "INVALID_SIG")
@@ -354,9 +354,9 @@ def t_chunk_tamper():
             tampered["done"] = True
             env = dict(env)
             box = dict(env["box"])
-            raw = bytearray(b62decode(box["ct"]))
+            raw = bytearray(b62decode_fixed(box["ct"]))
             raw[len(raw) // 2] ^= 0x01
-            box["ct"] = b62encode(bytes(raw))
+            box["ct"] = b62encode_fixed(bytes(raw))
             env["box"] = box
             # the Ed25519 signature no longer matches either: the frame
             # is rejected at the signature layer, so the chunk never
