@@ -59,7 +59,6 @@ Date: 2026-09-27. Base build (phases 1–25) is live at ~/.vm-agent and on kilom
 - `src/txn.py` — transactional tool execution + operation registry (op IDs, UNKNOWN reconcile)
 - `src/budgets.py` — action budgets
 - `src/net.py` — network failure classifier + retry policies
-- `src/browserx.py` — browser recovery subsystem
 - `src/integrity.py` — file integrity hashes + config protection
 - `src/intervene.py` — human intervention queue
 - `src/resources.py` — resource pressure monitor + response
