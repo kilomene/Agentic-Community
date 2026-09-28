@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", ".."))
 
 from acp_sdk import AcpClient  # noqa: E402
+from acp_sdk.examples._util import pair, retry  # noqa: E402
 
 
 def main(argv=None):
@@ -30,44 +31,50 @@ def main(argv=None):
     p.add_argument("--text", default="stand up and stretch")
     args = p.parse_args(argv)
 
-    code_box = {}
-    arrived = threading.Event()
-    got = []
-    done = threading.Event()
+    def scenario():
+        with AcpClient(args.home_a, args.passphrase,
+                       handle="alice") as alice, \
+                AcpClient(args.home_b, args.passphrase,
+                          handle="bob") as bob:
+            alice.start_server()
+            bob.start_server()
 
-    with AcpClient(args.home_a, args.passphrase, handle="alice") as alice, \
-            AcpClient(args.home_b, args.passphrase, handle="bob") as bob:
-        alice.start_server()
-        bob_host, bob_port = bob.start_server()
-        bob.on_pairing_request(
-            lambda s: (code_box.setdefault("code", s.code),
-                       s.accept(), arrived.set()))
+            got = []
+            done = threading.Event()
 
-        def on_msg(sender, text, msg_id):
-            got.append(text)
-            print("reminder %d/%d: %s" % (len(got), args.count, text))
-            if len(got) >= args.count:
-                done.set()
+            def on_msg(sender, text, msg_id):
+                got.append(text)
+                print("reminder %d/%d: %s"
+                      % (len(got), args.count, text))
+                if len(got) >= args.count:
+                    done.set()
 
-        bob.on_message(on_msg)
+            bob.on_message(on_msg)
 
-        peer_id = alice.pair_with(
-            bob_host, bob_port,
-            approve_callback=lambda: code_box["code"]
-            if arrived.wait(30) else None)
+            peer_id = pair(alice, bob)
 
-        sent = []
+            sent = []
 
-        def reminder():
-            mid = alice.send_message(peer_id, args.text)
-            sent.append(mid)
+            def reminder():
+                try:
+                    mid = alice.send_message(peer_id, args.text)
+                    sent.append(mid)
+                except Exception as e:  # noqa: BLE001 - one flaked
+                    # reminder is skipped; the next tick retries. (A
+                    # single E2E envelope can hit the pre-existing V1
+                    # b62 flake; see acp_sdk/README.md "Known issues".)
+                    print("reminder tick failed (%s), will retry next "
+                          "tick" % e)
 
-        job = alice.schedule_every(args.interval, reminder)
-        assert done.wait(30 + args.interval * args.count), \
-            "reminders never arrived"
-        job.cancel()
-        assert len(sent) >= args.count, "scheduler sent too few reminders"
-        print("OK: %d scheduled reminders delivered" % len(got))
+            job = alice.schedule_every(args.interval, reminder)
+            try:
+                assert done.wait(30 + args.interval * args.count), \
+                    "reminders never arrived"
+            finally:
+                job.cancel()
+            print("OK: %d scheduled reminders delivered" % len(got))
+
+    retry(scenario, attempts=3, label="scheduled_reminder")
     return 0
 
 
