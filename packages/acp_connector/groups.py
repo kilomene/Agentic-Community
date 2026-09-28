@@ -40,7 +40,8 @@ import time
 
 from acp_crypto import aead_encrypt, aead_decrypt, random_bytes
 from acp_proto import (
-    AcpError, b62encode, b62decode, canonical, register_kind,
+    AcpError, b62encode, b62encode_fixed, b62decode_fixed, canonical,
+    register_kind,
 )
 
 GROUP_CREATE = register_kind(
@@ -246,7 +247,7 @@ class GroupChat:
 
     def _distribute_key(self, group_id, epoch, key, members):
         c = self._c
-        key_b62 = b62encode(key)
+        key_b62 = b62encode_fixed(key)
         for pid in members:
             try:
                 c._send_e2e(GROUP_KEY, pid, {
@@ -308,7 +309,7 @@ class GroupChat:
             ct = aead_encrypt(key, nonce, pt, aad)
             payload = {
                 "group_id": group_id, "epoch": epoch, "seq": seq,
-                "nonce": b62encode(nonce), "ct": b62encode(ct),
+                "nonce": b62encode_fixed(nonce), "ct": b62encode_fixed(ct),
             }
             msg_id = "gm-" + b62encode(random_bytes(12))
             now = int(time.time())
@@ -542,7 +543,7 @@ class GroupChat:
         group_id = payload["group_id"]
         epoch = int(payload["epoch"])
         try:
-            key = b62decode(payload["key"]).rjust(32, b"\x00")
+            key = b62decode_fixed(payload["key"])
         except (ValueError, KeyError, AttributeError):
             c.audit.log("group.key_bad", actor=sender, target=group_id,
                         result="denied", details={"reason": "bad key bytes"})
@@ -599,8 +600,8 @@ class GroupChat:
                             details={"epoch": epoch, "seq": seq})
                 return
             try:
-                nonce = b62decode(payload["nonce"]).rjust(12, b"\x00")
-                ct = b62decode(payload["ct"])
+                nonce = b62decode_fixed(payload["nonce"])
+                ct = b62decode_fixed(payload["ct"])
             except (ValueError, KeyError, AttributeError):
                 c.audit.log("group.msg_bad_fields", actor=sender,
                             target=group_id, result="denied", details={})
