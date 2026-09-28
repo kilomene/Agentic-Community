@@ -174,6 +174,8 @@ def b62encode_fixed(raw: bytes) -> str:
 
 
 def b62decode_fixed(s: str) -> bytes:
+    if not isinstance(s, str):
+        raise ValueError("bad fixed b62 encoding")
     ln, _, val = s.partition(":")
     ln = int(ln)
     if ln == 0:
@@ -318,7 +320,11 @@ def verify_envelope(env: dict, get_pubkey, max_age=300, now=None) -> dict:
 
 def check_freshness(ts, max_age=300, now=None):
     now = int(time.time()) if now is None else now
-    if abs(now - int(ts)) > max_age:
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        raise AcpError("BAD_ENVELOPE", f"bad envelope ts: {ts!r}")
+    if abs(now - ts) > max_age:
         raise AcpError("EXPIRED", f"ts={ts} now={now}")
     return True
 
@@ -329,7 +335,10 @@ def open_e2e_envelope(env: dict, get_pubkey, my_x_priv: bytes,
     verify_envelope(env, get_pubkey, max_age=max_age, now=now)
     if env["kind"] not in E2E_KINDS or "box" not in env:
         raise AcpError("BAD_ENVELOPE", "not an E2E envelope")
-    peer_x_pub = b62decode_fixed(env["x_pub"])
+    try:
+        peer_x_pub = b62decode_fixed(env["x_pub"])
+    except (ValueError, KeyError, TypeError):
+        raise AcpError("BAD_ENVELOPE", "bad x_pub encoding")
     pt = e2e_decrypt(my_x_priv, peer_x_pub, env["box"], env["kind"],
                      env["from"], env["to"], env["ts"], env["nonce"])
     try:
@@ -344,7 +353,7 @@ def open_e2e_envelope(env: dict, get_pubkey, my_x_priv: bytes,
 
 def frame_envelope(env: dict) -> bytes:
     data = canonical(env)
-    if len(data) > 16 * 1024 * 1024:
+    if len(data) > 4 * 1024 * 1024:
         raise AcpError("BAD_ENVELOPE", "frame too large")
     return len(data).to_bytes(4, "big") + data
 
@@ -355,7 +364,7 @@ def parse_frames(buf: bytes):
     off = 0
     while len(buf) - off >= 4:
         ln = int.from_bytes(buf[off:off + 4], "big")
-        if ln > 16 * 1024 * 1024:
+        if ln > 4 * 1024 * 1024:
             raise AcpError("BAD_ENVELOPE", "frame too large")
         if len(buf) - off - 4 < ln:
             break
