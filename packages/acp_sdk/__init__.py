@@ -7,7 +7,7 @@ This package wraps :class:`acp_connector.Connector` and
     from acp_sdk import AcpClient
 
     with AcpClient("~/.acp-alice", "correct-horse") as alice:
-        alice.pair_with("127.0.0.1", 9000, approve_callback=lambda code: code)
+        alice.pair_with("127.0.0.1", 9000, approve_callback=lambda: code)
         alice.send_message(peer_id, "hello world")
 
 Stdlib only. The package works by adding the repo's ``packages`` and
@@ -52,8 +52,8 @@ def pair(home, passphrase, host, port, approve_callback, handle=None,
          timeout=120):
     """Pair a fresh agent home with a remote agent in one call.
 
-    ``approve_callback`` receives the 6-character pairing code shown on
-    the responder side and must return it verbatim (``lambda:
+    ``approve_callback`` is called with no arguments and must return the
+    6-character pairing code shown on the responder side (``lambda:
     input("code: ")`` for interactive use, or a function returning a
     code captured from the responder's ``on_pairing_request`` handler
     in tests). Returns the created :class:`AcpClient` (still open — use
