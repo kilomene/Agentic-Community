@@ -549,16 +549,6 @@ class Store:
         return [dict(r) for r in rows]
 
     # ---- snapshots (phase 47/67) ----
-    def snapshot(self, task_id, label, state, config=None):
-        with _lock:
-            cur = self._conn.execute(
-                "INSERT INTO snapshots (task_id, label, state_json, config_json,"
-                " created_at) VALUES (?,?,?,?,?)",
-                (task_id, label, json.dumps(state),
-                 json.dumps(config) if config else None, time.time()))
-            self._conn.commit()
-            return cur.lastrowid
-
     def snapshot_save(self, task_id, label, state_blob, content_sha256=None):
         """Phase 67: content-hashed resumable snapshot. state_blob is the
         canonical JSON string (hash computed over exactly this)."""
