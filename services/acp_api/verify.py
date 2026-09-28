@@ -26,7 +26,6 @@ threat model.
 """
 import os
 import sys
-import time
 
 # make acp_crypto / acp_proto importable however this module is loaded
 _packages = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -107,11 +106,3 @@ def verify_badge(badge, authority_pub):
         return False
     payload = {k: v for k, v in badge.items() if k != "authority_sig"}
     return ed25519_verify(authority_pub, canonical(payload), sig)
-
-
-def badge_expired(badge, now=None):
-    now = int(time.time()) if now is None else now
-    try:
-        return int(badge.get("expires_at", 0)) <= now
-    except (TypeError, ValueError):
-        return True
