@@ -68,9 +68,9 @@ connector runtime. `handle` names a new identity; it is ignored when
 | `place_call(peer_id, source, sink)` | **Optional** — needs the `acp_voice` module (not in V1); raises a clear `AcpError` when missing |
 | `schedule_every(secs, fn, *a, **k)` | Run `fn` every N seconds on a background thread; returns a handle with `.cancel()` |
 | `schedule_at(when, fn, *a, **k)` | Run `fn` once at unix timestamp `when` |
-| `directory_register(api_url, handle=None)` | Register handle with the directory; remembers the URL |
+| `directory_register(api_url, handle=None, api_key=None)` | Register handle with the directory; remembers the URL (+ optional API key for key-gated routes) |
 | `directory_search(handle)` | Resolve a handle → `{"handle", "ipub", "x_pub"}` |
-| `directory_set_presence(state, handle=None)` | Publish signed presence to the directory |
+| `directory_set_presence(state, handle=None)` | Publish signed presence (needs an API key with `presence:write`, passed to `directory_register`) |
 | `set_presence(state)` / `get_presence(pid)` | P2P presence |
 | `grant_permission(pid, scope)` | Grant a permission scope to a peer |
 | `revoke_peer(pid, reason=...)` | Sever trust with a peer |
