@@ -13,8 +13,6 @@ is consulted:
 External side effects that cannot prove exactly-once are recorded with their
 idempotency key; ambiguous crashes leave them UNKNOWN, never assumed.
 """
-import time
-import uuid
 
 try:
     from .state import _pid_alive  # reuse liveness helper
@@ -167,10 +165,6 @@ class TxnRunner:
         return TxnResult(False, "verify",
                          {"verdict": verdict, "exec": str(exec_res)[:500]},
                          rolled_back=rolled_back)
-
-
-def new_op_id(kind):
-    return f"{kind}:{uuid.uuid4().hex[:12]}"
 
 
 def reconcile_external(store, op_id, probe_fn, resume_fn=None, journal=None):
