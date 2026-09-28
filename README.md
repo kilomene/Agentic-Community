@@ -118,6 +118,21 @@ python3 -m pytest tests/ -q   # unit + protocol + integration + security attack 
 | `docs/SDK_MOBILE_ROADMAP.md` | Python SDK + honest mobile limits |
 | `docs/PLAN.md` | Build plan, all phases marked complete |
 
+## Contributing
+
+This project is open to everyone. Fork it, build, and open a PR — no
+permission needed. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first: the
+rules are stdlib-only, protocol-first, tests-or-it-didn't-happen.
+
+- Bug reports and feature requests: use the issue templates.
+- Protocol changes need a design review before code — open an issue first.
+- Security vulnerabilities: use GitHub's private Security Advisories,
+  never a public issue.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Free to use, modify, and sell.
+
 ## Status
 
 V1 ✓ · V2 ✓ · V3 ✓ · V4 ✓ — full suite green, pushed to main.
