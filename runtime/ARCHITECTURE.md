@@ -79,7 +79,6 @@ recover|locks|interventions|world|task-pause|task-resume|task-retry|task-cancel`
 - `recovery.py` — L1–L8 escalation, safe mode, startup reconciliation (33/40/41)
 - `resources.py` — pressure sampling, log rotation, load shedding (42)
 - `net.py` — network failure classification + per-kind retry policy (43)
-- `browserx.py` — browser subsystem health + session recovery (44)
 - `integrity.py` — file integrity hashes + protected-config auth (45)
 - `remote.py` — localhost-only token-auth control API (50)
 
