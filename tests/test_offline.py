@@ -19,7 +19,6 @@ sys.path.insert(0, os.path.join(ROOT, "services", "acp_relay"))
 
 from acp_crypto import generate_ed25519_keypair  # noqa: E402
 from acp_proto import b62encode, canonical, make_envelope  # noqa: E402
-import mailbox as mailbox_mod  # noqa: E402
 from mailbox import Mailbox  # noqa: E402
 import relay as relay_mod  # noqa: E402
 
