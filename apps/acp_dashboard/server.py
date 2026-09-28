@@ -87,6 +87,8 @@ class Dashboard:
     # ------------------------------------------------------- message mapping
     def _on_inbound_message(self, sender_pid, text, msg_id):
         with self._lock:
+            if self._db is None:  # Dashboard.stop() already ran
+                return
             self._db.execute(
                 "INSERT OR IGNORE INTO dashboard_msg_peer(message_id,"
                 " peer_id) VALUES (?,?)", (msg_id, sender_pid))
@@ -105,6 +107,8 @@ class Dashboard:
 
     def _map_message(self, msg_id, peer_id):
         with self._lock:
+            if self._db is None:  # Dashboard.stop() already ran
+                return
             self._db.execute(
                 "INSERT OR REPLACE INTO dashboard_msg_peer(message_id,"
                 " peer_id) VALUES (?,?)", (msg_id, peer_id))
@@ -112,6 +116,8 @@ class Dashboard:
 
     def _peer_for_message(self, msg_id):
         with self._lock:
+            if self._db is None:  # Dashboard.stop() already ran
+                return None
             r = self._db.execute(
                 "SELECT peer_id FROM dashboard_msg_peer WHERE message_id=?",
                 (msg_id,)).fetchone()
@@ -161,11 +167,18 @@ class Dashboard:
             except Exception:
                 pass
             self._httpd = None
-        try:
-            self._db.commit()
-            self._db.close()
-        except Exception:
-            pass
+        # In-flight handler / background threads and connector callbacks
+        # may still touch the DB after this point: detach it under the
+        # lock so they degrade to no-ops instead of raising on a closed
+        # handle, then close it exactly once here.
+        with self._lock:
+            db, self._db = self._db, None
+        if db is not None:
+            try:
+                db.commit()
+                db.close()
+            except Exception:
+                pass
 
     # ---------------------------------------------------------------- router
     _GET_HANDLERS = {
@@ -301,6 +314,11 @@ class Dashboard:
             length = int(req.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
+        if length < 0:
+            # read(negative) would read until EOF and hang the handler
+            # thread on a keep-alive connection.
+            self._json(req, {"ok": False, "code": "BAD_CONTENT_LENGTH"}, 400)
+            return None
         if length > MAX_BODY:
             self._json(req, {"ok": False, "code": "TOO_LARGE"}, 413)
             return None
@@ -320,8 +338,6 @@ class Dashboard:
         return data
 
     def _acp_fail(self, req, e, lang):
-        # Import here to avoid a hard dependency at module import time.
-        from acp_connector import AcpError  # noqa: F401
         self._json(req, {"ok": False, "code": e.code,
                          "detail": e.detail or ""},
                    _acp_error_to_status(e.code))
@@ -354,6 +370,8 @@ class Dashboard:
 
     def _q(self, sql, args=(), limit=500):
         with self._lock:
+            if self._db is None:  # Dashboard.stop() already ran
+                return []
             cur = self._db.execute(sql + " LIMIT %d" % int(limit), args)
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
