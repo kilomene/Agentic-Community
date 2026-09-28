@@ -4,7 +4,7 @@
 
 | Threat | Mitigation (V1) |
 |---|---|
-| Pairing brute force | 41-bit code space, 5-minute expiry, 5 attempt cap, single-use |
+| Pairing brute force | ~29-bit code space (6 chars from a 30-char alphabet), 10-minute session expiry, 5 attempt cap, single-use |
 | Pairing interception | Code alone is useless; mutual Ed25519 challenge-response proves key ownership; explicit approval on the generator's side |
 | Replay | Per-sender nonce cache + ±300 s timestamp window; challenges single-use |
 | Message tampering | Ed25519 signatures over canonical bytes; E2E AEAD binds envelope fields via AAD |
