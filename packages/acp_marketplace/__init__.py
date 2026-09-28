@@ -24,7 +24,7 @@ import time
 
 from acp_crypto import ed25519_sign, ed25519_verify
 from acp_proto import (
-    AcpError, b62decode, b62encode, canonical, register_kind,
+    AcpError, b62decode_fixed, b62encode_fixed, canonical, register_kind,
 )
 
 from .manifest import (
@@ -316,7 +316,7 @@ class Marketplace:
                      "error": "package_too_large"})
                 return
             files.append({"path": entry["path"], "sha256": entry["sha256"],
-                          "content": b62encode(data)})
+                          "content": b62encode_fixed(data)})
         self._c._send_e2e(MARKET_PACKAGE, env["from"],
                           {"found": True, "manifest": manifest,
                            "files": files})
@@ -333,7 +333,7 @@ class Marketplace:
         """Fetch a package from a peer over ACP. Returns
         (manifest, {path: bytes}) after verifying publisher signature
         and every file sha256."""
-        from acp_proto import b62decode as _b62d
+        from acp_proto import b62decode_fixed as _b62d
         key = (MARKET_PACKAGE, peer_pid, name)
         waiter = {"event": threading.Event(), "payload": None}
         with self._lock:
@@ -472,7 +472,7 @@ class Marketplace:
             "terms": terms,
             "ts": int(time.time()),
         }
-        listing["sig"] = b62encode(ed25519_sign(
+        listing["sig"] = b62encode_fixed(ed25519_sign(
             self._c.identity.ed_priv, canonical(listing)))
         self.store.add_service(listing)
         self._audit("service.published", target=listing["listing_id"],
@@ -490,7 +490,7 @@ class Marketplace:
             raise AcpError("UNKNOWN_SENDER", "unknown listing agent")
         unsigned = {k: v for k, v in listing.items() if k != "sig"}
         try:
-            sig = b62decode(listing["sig"])
+            sig = b62decode_fixed(listing["sig"])
         except (ValueError, KeyError):
             raise AcpError("BAD_ENVELOPE", "bad listing sig encoding")
         if not ed25519_verify(vkey, canonical(unsigned), sig):
@@ -826,7 +826,7 @@ class Marketplace:
                            f"bad resolution {resolution!r}")
         ts = int(time.time())
         body = {"offer_id": offer_id, "resolution": resolution, "ts": ts}
-        sig = b62encode(ed25519_sign(self._c.identity.ed_priv,
+        sig = b62encode_fixed(ed25519_sign(self._c.identity.ed_priv,
                                      canonical(body)))
         payload = dict(body, resolver_sig=sig)
         targets = list(peers) if peers else []
@@ -860,7 +860,7 @@ class Marketplace:
         body = {"offer_id": payload["offer_id"],
                 "resolution": payload["resolution"], "ts": payload["ts"]}
         try:
-            sig = b62decode(payload["resolver_sig"])
+            sig = b62decode_fixed(payload["resolver_sig"])
         except (ValueError, KeyError):
             raise AcpError("BAD_ENVELOPE", "bad resolver_sig encoding")
         if not ed25519_verify(vkey, canonical(body), sig):
