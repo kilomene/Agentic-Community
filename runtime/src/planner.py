@@ -14,8 +14,6 @@ On stall: stop the planning cycle, preserve task state, rebuild a plan
 from verified world state, validate the new plan, then resume. Never
 allow infinite planning loops (hard cap + rebuild-refusal guard).
 """
-import hashlib
-import json
 import time
 
 # thresholds
@@ -26,45 +24,6 @@ REBUILD_WINDOW_S = 300      # rebuild-refusal window
 MAX_REBUILDS_PER_WINDOW = 2  # at most this many rebuilds per window
 
 _REBUILDS = {}  # task_id -> [timestamps] (rebuild-refusal guard)
-
-
-def plan_signature(plan):
-    """Stable hash of a plan's action sequence."""
-    canonical = json.dumps(plan, sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
-
-
-class PlanHistory:
-    """In-memory + journaled plan history per task."""
-
-    def __init__(self, store, journal=None):
-        self.store = store
-        self.journal = journal or store.journal
-        self._plans = {}  # task_id -> list of {sig, plan, result, ts}
-
-    def record(self, task_id, plan, result="proposed"):
-        sig = plan_signature(plan)
-        entry = {"sig": sig, "plan": plan, "result": result,
-                 "ts": time.time()}
-        self._plans.setdefault(task_id, []).append(entry)
-        self.journal("PLAN_RECORDED", task_id=task_id, sig=sig, result=result)
-        return sig
-
-    def history(self, task_id):
-        return list(self._plans.get(task_id, []))
-
-    def count_same(self, task_id, sig):
-        return sum(1 for e in self._plans.get(task_id, [])
-                   if e["sig"] == sig)
-
-    def cycles(self, task_id):
-        return len(self._plans.get(task_id, []))
-
-
-def _plan_steps(plan):
-    if isinstance(plan, dict):
-        return plan.get("steps", [])
-    return plan or []
 
 
 # ---- step-list API (used by the agent runtime) ----
@@ -168,81 +127,3 @@ def validate_plan(steps):
         if not ok:
             issues.append(f"step {i}: {'; '.join(errs)}")
     return (len(issues) == 0), issues
-
-
-def reset_rebuild_guard(task_id):
-    """Clear the rebuild-refusal window (e.g. after human intervention)."""
-    _REBUILDS.pop(task_id, None)
-
-
-# ---- legacy structured API (kept for compatibility) ----
-def diagnose(task_id, plan, history, store, world=None):
-    """Return (stalled: bool, reasons: [str]). Pure function of record."""
-    reasons = []
-    sig = plan_signature(plan)
-    steps = _plan_steps(plan)
-    world = world or {}
-
-    if history.count_same(task_id, sig) >= REPETITION_LIMIT:
-        reasons.append(f"repetitive plan proposed {REPETITION_LIMIT}x: {sig}")
-    failed_sigs = {e["sig"] for e in history.history(task_id)
-                   if e["result"] == "failed"}
-    if sig in failed_sigs:
-        reasons.append("identical plan already failed")
-    if history.cycles(task_id) >= MAX_PLAN_CYCLES:
-        reasons.append(f"plan cycle cap reached ({MAX_PLAN_CYCLES})")
-
-    from . import caps as capsmod
-    available_tools = set(capsmod.TOOL_CAPABILITY)
-    for i, step in enumerate(steps):
-        tool = step.get("tool")
-        if tool and tool not in available_tools:
-            reasons.append(f"step {i}: unknown tool '{tool}'")
-
-    for i, step in enumerate(steps):
-        for key, must in (step.get("requires_world") or {}).items():
-            actual = world.get(key, {}).get("value", "<unknown>")
-            if actual != must and actual != "<unknown>":
-                reasons.append(
-                    f"step {i}: conflicts with verified world: {key}={actual!r}"
-                    f" (plan needs {must!r})")
-
-    seq = [e["plan"].get("resume_step") for e in history.history(task_id)
-           if isinstance(e["plan"], dict) and "resume_step" in e["plan"]]
-    if len(seq) >= 3 and len(set(seq[-3:])) == 1:
-        reasons.append(f"plan oscillates on step {seq[-1]}")
-
-    return (len(reasons) > 0), reasons
-
-
-def recover(task_id, store, spec, history, journal=None):
-    """Phase 52 recovery: stop cycle -> preserve state -> rebuild from
-    verified world state -> validate -> resume. Returns
-    (plan, valid, errors)."""
-    journal = journal or store.journal
-    journal("PLANNER_RECOVERY", task_id=task_id,
-            reason="planner stall detected")
-    ckpt = store.latest_checkpoint(task_id)
-    journal("PLANNER_STATE_PRESERVED", task_id=task_id,
-            checkpoint=ckpt["label"] if ckpt else None)
-    spec = spec or {}
-    steps = spec.get("steps", [])
-    failed_idx = spec.get("failed_step", 0)
-    new_steps, reason_str = rebuild_plan(
-        task_id, steps, failed_idx,
-        reason=spec.get("reason", "stall"), store=store, journal=journal)
-    plan = {"steps": new_steps, "rebuilt_from": "verified_state",
-            "world_snapshot_ts": time.time()}
-    valid, errors = validate_plan(new_steps)
-    if not valid:
-        journal("PLANNER_RECOVERY_FAILED", task_id=task_id, errors=errors)
-        store.intervention_open(
-            task_id=task_id,
-            reason=f"planner could not build a valid plan: {errors}",
-            required_action="review task spec and world state, then resume",
-            last_verified_step=ckpt["label"] if ckpt else None)
-        return None, False, errors
-    history.record(task_id, plan, result="rebuilt")
-    journal("PLANNER_RESUMED", task_id=task_id, steps=len(new_steps),
-            reason=reason_str)
-    return plan, True, []
