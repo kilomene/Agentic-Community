@@ -36,13 +36,20 @@ class PolicyEngine:
 
     # ------------------------------------------------------------ configuration
     def set_rate_limit(self, per_min):
+        per_min = int(per_min)
+        if per_min < 1:
+            raise AcpError("INTERNAL",
+                           "rate limit must be at least 1/minute")
         with self._lock:
-            self.rate_per_min = int(per_min)
+            self.rate_per_min = per_min
         self._store.kv_set("policy.rate_per_min", str(per_min))
 
     def set_file_size_cap(self, max_bytes):
+        max_bytes = int(max_bytes)
+        if max_bytes < 0:
+            raise AcpError("INTERNAL", "file size cap cannot be negative")
         with self._lock:
-            self.max_file_bytes = int(max_bytes)
+            self.max_file_bytes = max_bytes
         self._store.kv_set("policy.max_file_bytes", str(max_bytes))
 
     def set_auto_accept_files(self, value):
