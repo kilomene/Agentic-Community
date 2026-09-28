@@ -18,7 +18,6 @@ import shutil
 import struct
 import sys
 import tempfile
-import threading
 import time
 import wave
 
