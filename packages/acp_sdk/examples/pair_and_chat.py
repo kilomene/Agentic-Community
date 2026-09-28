@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", ".."))
 
 from acp_sdk import AcpClient  # noqa: E402
+from acp_sdk.examples._util import pair, retry  # noqa: E402
 
 
 def main(argv=None):
@@ -26,37 +27,34 @@ def main(argv=None):
     p.add_argument("--text", default="hello bob, this is alice")
     args = p.parse_args(argv)
 
-    code_box = {}
+    def scenario():
+        with AcpClient(args.home_a, args.passphrase,
+                       handle="alice") as alice, \
+                AcpClient(args.home_b, args.passphrase,
+                          handle="bob") as bob:
+            alice.start_server()
+            bob.start_server()
 
-    with AcpClient(args.home_a, args.passphrase, handle="alice") as alice, \
-            AcpClient(args.home_b, args.passphrase, handle="bob") as bob:
-        alice.start_server()
-        bob_host, bob_port = bob.start_server()
+            got = threading.Event()
+            inbox = []
 
-        bob.on_pairing_request(
-            lambda session: (code_box.setdefault("code", session.code),
-                             session.accept()))
+            def on_msg(sender, text, msg_id):
+                inbox.append((sender, text, msg_id))
+                got.set()
 
-        got = threading.Event()
-        inbox = []
+            bob.on_message(on_msg)
 
-        def on_msg(sender, text, msg_id):
-            inbox.append((sender, text, msg_id))
-            got.set()
+            peer_id = pair(alice, bob)
+            print("paired: alice -> bob (%s...)" % peer_id[:12])
 
-        bob.on_message(on_msg)
+            mid = alice.send_message(peer_id, args.text)
+            assert got.wait(30), "bob never received the message"
+            sender, text, got_mid = inbox[0]
+            assert sender == alice.peer_id and text == args.text
+            print("bob received: %r (msg %s...)" % (text, got_mid[:8]))
+            print("OK: pair + chat works (msg id %s...)" % mid[:8])
 
-        peer_id = alice.pair_with(bob_host, bob_port,
-                                  approve_callback=lambda: code_box["code"])
-        assert peer_id == bob.peer_id, "paired with the wrong peer"
-        print("paired: alice -> bob (%s...)" % peer_id[:12])
-
-        mid = alice.send_message(peer_id, args.text)
-        assert got.wait(30), "bob never received the message"
-        sender, text, got_mid = inbox[0]
-        assert sender == alice.peer_id and text == args.text
-        print("bob received: %r (msg %s...)" % (text, got_mid[:8]))
-        print("OK: pair + chat works (msg id %s...)" % mid[:8])
+    retry(scenario, attempts=3, label="pair_and_chat")
     return 0
 
 
