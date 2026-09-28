@@ -9,15 +9,13 @@ A dedicated secret-management boundary:
   - accidental credential exposure is detected and journaled (loudly)
 
 Design: secrets live in an in-memory vault (never persisted to SQLite or
-the journal). Tools receive them via a controlled `SecretRef` placeholder
-that is substituted at the last moment inside the executor and redacted
-from every record.
+the journal). Task steps reference them via {"vault": "<name>"} refs,
+which the agent resolves at execution time to raw values, hands to the
+executor, and redacts (by value) from every journaled record.
 
 Canonical store: the module-level `_VAULT` dict behind `vault_set` /
-`vault_get` / `vault_drop` (scoped leases per task). The `SecretVault`
-class below is a legacy alternate that is not used by the runtime;
-`redact_text` consults both, but the runtime resolves and redacts through
-the module-level store only.
+`vault_get` / `vault_drop` (scoped leases per task); `redact_text`
+consults it so stored secrets never leak into redacted output.
 """
 import os
 import re
@@ -32,60 +30,6 @@ EXPOSURE_PATTERNS = [
     re.compile(r"-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----"),
     re.compile(r"(?i)bearer\s+[A-Za-z0-9\-._~+/]{16,}={0,2}"),
 ]
-
-# Argument names that are always treated as secrets.
-SECRET_ARG_NAMES = ("token", "secret", "password", "passwd", "api_key",
-                    "apikey", "auth", "credential", "private_key",
-                    "client_secret", "access_token", "refresh_token")
-
-
-class SecretRef:
-    """Placeholder for a secret. The real value is only substituted inside
-    the executor at run time; str()/repr() never reveal it."""
-
-    def __init__(self, name):
-        self.name = name
-
-    def __repr__(self):
-        return f"<SecretRef {self.name}>"
-
-    def __str__(self):
-        return f"<SecretRef {self.name}>"
-
-
-class SecretVault:
-    """In-memory only. Nothing here is ever written to disk, the DB, or
-    the journal. Dies with the process."""
-
-    def __init__(self, journal=None):
-        self._secrets = {}
-        self._journal = journal
-
-    def put(self, name, value):
-        self._secrets[name] = value
-        if self._journal:
-            self._journal("SECRET_STORED", name=name)
-
-    def ref(self, name):
-        if name not in self._secrets:
-            raise KeyError(f"unknown secret: {name}")
-        return SecretRef(name)
-
-    def resolve(self, value):
-        """Substitute SecretRefs at tool-execution time only."""
-        if isinstance(value, SecretRef):
-            return self._secrets.get(value.name, "")
-        if isinstance(value, dict):
-            return {k: self.resolve(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self.resolve(v) for v in value]
-        return value
-
-    def names(self):
-        return list(self._secrets)
-
-    def drop(self, name):
-        self._secrets.pop(name, None)
 
 
 def redact_values(text, values):
@@ -106,49 +50,25 @@ def redact_values(text, values):
     return out
 
 
-def redact_text(text, vault=None):
+def redact_text(text):
     """Redact known secret values and anything matching exposure patterns.
 
     The module-level vault (populated by vault_set, the canonical store
     the agent and CLI use) is always consulted: a secret stored via
     vault_set must be redacted even when the caller passes no explicit
-    vault. An explicit SecretVault instance's values are redacted too.
+    values. Values are snapshotted first — the vault can be mutated
+    from another thread (vault_set / vault_drop) while redacting.
     """
     if not text:
         return text
     out = str(text)
-    values = []
-    if vault is not None:
-        for name in vault.names():
-            values.append(vault._secrets.get(name))
-    # canonical module-level vault: vault_set/vault_get/vault_drop
-    for rec in _VAULT.values():
-        values.append(rec.get("value"))
+    values = [rec.get("value") for rec in list(_VAULT.values())]
     for val in values:
         if val and len(val) >= 4:
             out = out.replace(val, "***REDACTED***")
     for pat in EXPOSURE_PATTERNS:
         out = pat.sub("***REDACTED***", out)
     return out
-
-
-def is_secret_arg(name):
-    n = name.lower()
-    return any(s in n for s in SECRET_ARG_NAMES)
-
-
-def redact_args(args, vault=None):
-    red = {}
-    for k, v in (args or {}).items():
-        if isinstance(v, SecretRef):
-            red[k] = repr(v)
-        elif is_secret_arg(k):
-            red[k] = "***REDACTED***"
-        elif isinstance(v, str) and len(v) > 500:
-            red[k] = f"<{len(v)} chars>"
-        else:
-            red[k] = v
-    return red
 
 
 def scan_for_exposure(text, context=""):
@@ -159,16 +79,6 @@ def scan_for_exposure(text, context=""):
             findings.append({"pattern": pat.pattern[:40],
                              "context": context,
                              "sample": m.group(0)[:24] + "..."})
-    return findings
-
-
-def audit_output(text, journal, context=""):
-    """Scan tool output for leaked secrets; journal loudly if found."""
-    findings = scan_for_exposure(text, context)
-    if findings and journal:
-        journal("SECRET_EXPOSURE_DETECTED", context=context,
-                findings=[{k: f[k] for k in ("pattern", "context")}
-                          for f in findings])
     return findings
 
 
