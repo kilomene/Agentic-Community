@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """acp — command-line interface for the ACP 1.0 Agent Community connector.
 
-Two subcommands:
+Three subcommands:
 
     acp init  --home DIR --handle NAME   create identity + database
     acp serve --home DIR --port N         start the connector + interactive REPL
+    acp relay --home DIR --url wss://..   connect to a relay + interactive REPL
+                                          (relay-only mode: no TCP server)
 
 Stdlib only. No network except localhost (and the optional directory URL
-the user passes to `register`, which is also expected to be local in V1).
+the user passes to `register`, which is also expected to be local in V1),
+plus the relay URL given to `acp relay`.
 """
 import argparse
 import cmd
@@ -120,6 +123,40 @@ def serve_home(home, passphrase, host, port):
     conn = shell.conn
     print("serving as '%s' (%s)" % (conn.handle, _short(conn.peer_id)))
     print("listening on %s:%d" % shell.server_addr)
+    print("type 'help' for commands, 'quit' to exit.")
+    try:
+        shell.run_forever()
+    finally:
+        try:
+            conn.stop()
+        except Exception:
+            pass
+        print("stopped.")
+    return 0
+
+
+def relay_home(home, passphrase, url):
+    """Relay-only mode: connect to a wss:// relay, no TCP server, then
+    enter the same interactive REPL as serve."""
+    home = os.path.abspath(home)
+    if not os.path.exists(os.path.join(home, "connector.db")):
+        print("ERROR NOT_FOUND: %s is not initialized "
+              "(run: acp init --home %s --handle NAME first)" % (home, home))
+        return 1
+    conn = Connector(home, passphrase)
+    try:
+        conn.relay_connect(url)
+    except AcpError as e:
+        print("ERROR %s: %s" % (e.code, e.detail or ""))
+        try:
+            conn.stop()
+        except Exception:
+            pass
+        return 1
+    shell = AcpShell(conn)
+    shell.register_callbacks()
+    print("serving as '%s' (%s)" % (conn.handle, _short(conn.peer_id)))
+    print("connected to relay %s (relay-only mode, no TCP server)" % url)
     print("type 'help' for commands, 'quit' to exit.")
     try:
         shell.run_forever()
@@ -315,6 +352,20 @@ class AcpShell(cmd.Cmd):
         session = self.conn.pair_initiate(host, port)
         self._pending_pair = session
         self._emit("Pairing request sent to %s:%d." % (host, port))
+        self._emit("Waiting for code — type:  confirm <code shown on "
+                   "other side>")
+
+    @guard
+    def do_pair_pid(self, arg):
+        """pair-pid <peer-id> — send a pairing request via the relay (no
+        direct dial; needs an active relay link from `acp relay`)."""
+        argv = self._argv(arg, 1, "pair-pid <peer-id>")
+        pid = argv[0].strip()
+        if not pid:
+            raise AcpError("INTERNAL", "usage: pair-pid <peer-id>")
+        session = self.conn.pair_initiate_relay(pid)
+        self._pending_pair = session
+        self._emit("Pairing request sent via relay to %s." % _short(pid))
         self._emit("Waiting for code — type:  confirm <code shown on "
                    "other side>")
 
@@ -996,6 +1047,13 @@ def build_parser():
     ps.add_argument("--home", required=True, help="home directory")
     ps.add_argument("--port", required=True, type=int, help="listen port")
     ps.add_argument("--host", default="127.0.0.1", help="listen host")
+
+    pr = sub.add_parser("relay",
+                        help="connect to a wss:// relay + interactive REPL "
+                             "(no TCP server)")
+    pr.add_argument("--home", required=True, help="home directory")
+    pr.add_argument("--url", required=True,
+                    help="relay WebSocket URL, e.g. wss://host/path")
     return p
 
 
@@ -1008,6 +1066,8 @@ def main(argv=None):
         if args.cmd == "serve":
             return serve_home(args.home, get_passphrase(args),
                               args.host, args.port)
+        if args.cmd == "relay":
+            return relay_home(args.home, get_passphrase(args), args.url)
     except AcpError as e:
         print("ERROR %s: %s" % (e.code, e.detail or ""))
         return 1
