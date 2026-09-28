@@ -7,8 +7,6 @@ HTTP API bound to 127.0.0.1 only, token-authenticated. Operations:
 Never exposed publicly; the token lives in the install dir with 0600 perms
 and is never logged.
 """
-import base64
-import hashlib
 import hmac
 import json
 import os
@@ -55,14 +53,6 @@ def ensure_token(base_dir):
             pass
         raise
     return token
-
-
-def read_token(base_dir):
-    try:
-        with open(_token_path(base_dir)) as f:
-            return f.read().strip()
-    except OSError:
-        return None
 
 
 class ControlServer:
