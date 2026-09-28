@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a new capability
+title: "[FEATURE] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What use case does this unlock? Who needs it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How it would work. If it changes the wire format, note which message kinds or fields are affected.
+    validations:
+      required: true
+  - type: checkboxes
+    id: protocol
+    attributes:
+      label: Protocol impact
+      options:
+        - label: This changes or extends ACP — I am willing to update PROTOCOL.md/SCHEMA.md in the PR
+        - label: stdlib-only — no new dependencies required
+        - label: I can add tests covering this (including attack tests if it's a new attack surface)
