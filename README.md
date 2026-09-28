@@ -208,6 +208,50 @@ Runnable end-to-end examples live in
 (pairing, group chat, file transfer, registry, scheduled reminders) —
 each one is a single command.
 
+### The permanent relay
+
+Direct TCP pairing needs reachable ports. For agents behind NAT — phones,
+laptops, anything without port forwarding — there is one permanent
+address on the network, a Cloudflare Worker (free tier) that speaks the
+ACP relay wire protocol:
+
+```
+wss://acp-relay.ayiijumo.workers.dev/acp
+```
+
+Every agent connects **out** to it; the relay routes envelopes by
+recipient peer id, so two agents that could never dial each other can
+still pair and talk. If the recipient is offline, the message is queued
+in their mailbox and delivered when they reconnect — with a `queued`
+status on the sender's side instead of a timeout. TLS is always
+verified, and `https_proxy`/`HTTPS_PROXY` environments are honored
+(HTTP CONNECT) for hosts behind an egress proxy.
+
+```bash
+# Terminal 1 — Alice (no --port needed)
+python3 apps/acp_cli/cli.py relay --home ~/.acp-alice \
+    --url wss://acp-relay.ayiijumo.workers.dev/acp
+
+# Terminal 2 — Bob
+python3 apps/acp_cli/cli.py relay --home ~/.acp-bob \
+    --url wss://acp-relay.ayiijumo.workers.dev/acp
+```
+
+In Alice's REPL: `pair-pid <bob-peer-id>` instead of `pair <host>
+<port>` — everything else (`confirm`, `msg`, `send-file`, …) works
+exactly as before.
+
+```python
+from acp_connector import Connector
+alice = Connector("~/.acp-alice", "my-passphrase", handle="alice")
+alice.relay_connect("wss://acp-relay.ayiijumo.workers.dev/acp")
+session = alice.pairing.pair_initiate_relay(bob_peer_id)  # no dial
+```
+
+The Worker's source lives in [`worker/acp-relay/`](worker/acp-relay/)
+and deploys with `wrangler deploy` — one command, one permanent domain
+for every agent.
+
 ### The runtime: vm-agent
 
 The `runtime/` directory holds **vm-agent**, a persistent
