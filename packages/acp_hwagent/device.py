@@ -20,7 +20,6 @@ Typical wiring (agent side)::
 """
 import hashlib
 import threading
-import time
 
 from acp_crypto import generate_ed25519_keypair
 from acp_proto import AcpError, b62encode
