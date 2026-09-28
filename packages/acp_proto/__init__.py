@@ -9,6 +9,11 @@ Wire format (JSON):
   pair_confirm, pair_welcome).
 - ``sig`` = Ed25519 signature over canonical JSON of the envelope
   with ``sig`` removed.
+- Binary fields (``sig``, ``x_pub``, ``box.nonce``, ``box.ct``) use
+  length-prefixed base62 (``b62encode_fixed``: ``"<len>:<b62>"``) so
+  leading zero bytes survive the round trip. Plain ``b62encode`` is
+  only for opaque id strings (``from``/``to``/``nonce``) where exact
+  byte length is not required.
 - E2E: X25519 ECDH -> HKDF-SHA256 -> ChaCha20-Poly1305. ``x_pub`` is the
   sender's X25519 public key in plaintext (public keys are public);
   AAD binds from/to/ts/nonce/kind.
@@ -163,13 +168,22 @@ def b62decode(s: str) -> bytes:
 
 def b62encode_fixed(raw: bytes) -> str:
     """Encode with a length prefix so decode restores exact bytes."""
+    if not raw:
+        return "0:"
     return f"{len(raw)}:{b62encode(raw)}"
 
 
 def b62decode_fixed(s: str) -> bytes:
     ln, _, val = s.partition(":")
+    ln = int(ln)
+    if ln == 0:
+        if val not in ("", "0"):
+            raise ValueError("bad fixed b62 encoding")
+        return b""
     raw = b62decode(val)
-    return raw.rjust(int(ln), b"\x00")
+    if len(raw) > ln:
+        raise ValueError("fixed b62 payload longer than declared length")
+    return raw.rjust(ln, b"\x00")
 
 
 # ---------------------------------------------------------------- canonical JSON
@@ -207,7 +221,7 @@ def e2e_encrypt(my_x_priv: bytes, peer_x_pub: bytes, plaintext: bytes,
     iv = random_bytes(12)
     aad = _aad_for(kind, from_pid, to_pid, ts, nonce)
     ct = aead_encrypt(key, iv, plaintext, aad)
-    return {"nonce": b62encode(iv), "ct": b62encode(ct)}
+    return {"nonce": b62encode_fixed(iv), "ct": b62encode_fixed(ct)}
 
 
 def e2e_decrypt(my_x_priv: bytes, peer_x_pub: bytes, box: dict,
@@ -215,8 +229,8 @@ def e2e_decrypt(my_x_priv: bytes, peer_x_pub: bytes, box: dict,
     from acp_crypto import aead_decrypt
     key = _pairwise_key(my_x_priv, peer_x_pub)
     try:
-        iv = b62decode(box["nonce"]).rjust(12, b"\x00")
-        ct = b62decode(box["ct"])
+        iv = b62decode_fixed(box["nonce"])
+        ct = b62decode_fixed(box["ct"])
         aad = _aad_for(kind, from_pid, to_pid, ts, nonce)
         return aead_decrypt(key, iv, ct, aad)
     except (KeyError, ValueError) as e:
@@ -242,7 +256,8 @@ def make_envelope(kind, from_pid, to_pid, payload: dict, sign_priv: bytes,
     validate_payload(kind, payload)
     env = _base_envelope(kind, from_pid, to_pid, ts, nonce)
     env["payload"] = payload
-    env["sig"] = b62encode(ed25519_sign(sign_priv, canonical(_unsigned(env))))
+    env["sig"] = b62encode_fixed(ed25519_sign(sign_priv,
+                                              canonical(_unsigned(env))))
     return env
 
 
@@ -254,10 +269,11 @@ def make_e2e_envelope(kind, from_pid, to_pid, payload: dict, sign_priv: bytes,
         raise AcpError("BAD_ENVELOPE", f"{kind} is not an E2E kind")
     validate_payload(kind, payload)
     env = _base_envelope(kind, from_pid, to_pid, ts, nonce)
-    env["x_pub"] = b62encode(my_x_pub)
+    env["x_pub"] = b62encode_fixed(my_x_pub)
     env["box"] = e2e_encrypt(my_x_priv, peer_x_pub, canonical(payload),
                              kind, from_pid, to_pid, env["ts"], env["nonce"])
-    env["sig"] = b62encode(ed25519_sign(sign_priv, canonical(_unsigned(env))))
+    env["sig"] = b62encode_fixed(ed25519_sign(sign_priv,
+                                              canonical(_unsigned(env))))
     return env
 
 
@@ -291,7 +307,7 @@ def verify_envelope(env: dict, get_pubkey, max_age=300, now=None) -> dict:
         raise AcpError("BAD_ENVELOPE", "need exactly one of payload/box")
     vkey = _get_verify_key(env, get_pubkey)
     try:
-        sig = b62decode(env["sig"])
+        sig = b62decode_fixed(env["sig"])
     except (ValueError, KeyError):
         raise AcpError("BAD_ENVELOPE", "bad sig encoding")
     if not ed25519_verify(vkey, canonical(_unsigned(env)), sig):
@@ -313,7 +329,7 @@ def open_e2e_envelope(env: dict, get_pubkey, my_x_priv: bytes,
     verify_envelope(env, get_pubkey, max_age=max_age, now=now)
     if env["kind"] not in E2E_KINDS or "box" not in env:
         raise AcpError("BAD_ENVELOPE", "not an E2E envelope")
-    peer_x_pub = b62decode(env["x_pub"]).rjust(32, b"\x00")
+    peer_x_pub = b62decode_fixed(env["x_pub"])
     pt = e2e_decrypt(my_x_priv, peer_x_pub, env["box"], env["kind"],
                      env["from"], env["to"], env["ts"], env["nonce"])
     try:
