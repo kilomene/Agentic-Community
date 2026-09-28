@@ -154,7 +154,12 @@ class AcpShell(cmd.Cmd):
         self._pending_pair = None      # initiator PairingSession from `pair`
         self._responder_sessions = []  # responder sessions (for announcements)
         self._dir_url = None           # last directory URL from `register`
+        self._api_key = None           # `set-api-key` for key-gated API routes
         self.last_pair_code = None     # last code shown by a pairing request
+        self._groups_obj = None        # lazy GroupChat
+        self._voice_obj = None         # lazy VoiceCalls
+        self._market_obj = None        # lazy Marketplace
+        self._dashboard = None         # lazy Dashboard server
 
     # ------------------------------------------------------------ plumbing
     def _emit(self, line):
@@ -289,7 +294,7 @@ class AcpShell(cmd.Cmd):
                 "INTERNAL",
                 "no directory configured — use: "
                 "register <api_url> <handle> first")
-        return DirectoryClient(self._dir_url)
+        return DirectoryClient(self._dir_url, api_key=self._api_key)
 
     # -------------------------------------------------------------- commands
     @guard
@@ -661,6 +666,315 @@ class AcpShell(cmd.Cmd):
                        % (_fmt_ts(r["timestamp"]), r["action"], actor,
                           target, r["result"]))
 
+    # -------------------------------------------- lazy subsystem accessors
+    def _groups(self):
+        if self._groups_obj is None:
+            from acp_connector.groups import GroupChat
+            self._groups_obj = GroupChat(self.conn)
+        return self._groups_obj
+
+    def _voice(self):
+        if self._voice_obj is None:
+            from acp_connector.voice import VoiceCalls
+            self._voice_obj = VoiceCalls(self.conn)
+            self._voice_obj.on_incoming_call(self._on_incoming_call)
+        return self._voice_obj
+
+    def _on_incoming_call(self, call_id, peer_pid, offer):
+        self._emit("INCOMING CALL %s from %s (codec %s). "
+                   "call-accept %s | call-reject %s"
+                   % (call_id, _short(peer_pid),
+                      (offer or {}).get("codec", "?"),
+                      call_id, call_id))
+
+    def _market(self):
+        if self._market_obj is None:
+            from acp_marketplace import Marketplace
+            self._market_obj = Marketplace(self.conn)
+        return self._market_obj
+
+    def _resolve_group(self, prefix):
+        prefix = (prefix or "").strip()
+        matches = [g for g in self._groups().list_groups()
+                   if g["group_id"] == prefix
+                   or g["group_id"].startswith(prefix)]
+        if len(matches) == 1:
+            return matches[0]["group_id"]
+        if not matches:
+            raise AcpError("NOT_FOUND", "unknown group '%s'" % prefix)
+        raise AcpError("INTERNAL",
+                       "ambiguous group prefix '%s' (%d matches)"
+                       % (prefix, len(matches)))
+
+    # ---------------------------------------------------------------- groups
+    @guard
+    def do_group_create(self, arg):
+        """group-create <name> <peer> [peer ...] — create an E2E group."""
+        argv = self._argv(arg, 2, "group-create <name> <peer> [peer ...]")
+        name = argv[0]
+        pids = [self._resolve_pid(p) for p in argv[1:]]
+        gid = self._groups().create_group(name, pids)
+        self._emit("group created: %s" % gid)
+
+    @guard
+    def do_group_msg(self, arg):
+        """group-msg <group-id-prefix> <text> — send to an E2E group."""
+        argv = self._argv(arg, 2, "group-msg <group-id-prefix> <text>")
+        gid = self._resolve_group(argv[0])
+        self._groups().send_group_message(gid, " ".join(argv[1:]))
+        self._emit("sent to %s" % _short(gid))
+
+    @guard
+    def do_group_add(self, arg):
+        """group-add <group-id-prefix> <peer> — add a member (rotates keys)."""
+        argv = self._argv(arg, 2, "group-add <group-id-prefix> <peer>")
+        self._groups().add_member(self._resolve_group(argv[0]),
+                                  self._resolve_pid(argv[1]))
+        self._emit("member added.")
+
+    @guard
+    def do_group_remove(self, arg):
+        """group-remove <group-id-prefix> <peer> — remove a member."""
+        argv = self._argv(arg, 2, "group-remove <group-id-prefix> <peer>")
+        self._groups().remove_member(self._resolve_group(argv[0]),
+                                     self._resolve_pid(argv[1]))
+        self._emit("member removed.")
+
+    @guard
+    def do_group_leave(self, arg):
+        """group-leave <group-id-prefix> — leave a group."""
+        argv = self._argv(arg, 1, "group-leave <group-id-prefix>")
+        self._groups().leave_group(self._resolve_group(argv[0]))
+        self._emit("left the group.")
+
+    @guard
+    def do_group_list(self, arg):
+        """group-list — list groups you belong to."""
+        groups = self._groups().list_groups()
+        if not groups:
+            self._emit("(no groups)")
+            return
+        for g in groups:
+            self._emit("%s  '%s'  %d members"
+                       % (_short(g["group_id"]), g.get("name", "?"),
+                          len(g.get("members", []))))
+
+    @guard
+    def do_group_history(self, arg):
+        """group-history <group-id-prefix> [limit] — show recent messages."""
+        argv = self._argv(arg, 1, "group-history <group-id-prefix> [limit]")
+        limit = int(argv[1]) if len(argv) > 1 else 20
+        for m in self._groups().get_history(self._resolve_group(argv[0]),
+                                            limit=limit):
+            self._emit("[%s] %s: %s"
+                       % (_fmt_ts(m.get("ts", 0)),
+                          _short(m.get("sender", "?")),
+                          m.get("text", "")))
+
+    # ----------------------------------------------------------------- voice
+    @guard
+    def do_call(self, arg):
+        """call <peer> — place an E2E voice call (tone test source)."""
+        argv = self._argv(arg, 1, "call <peer>")
+        pid = self._resolve_pid(argv[0])
+        from acp_connector.voice import ToneSource, WavRecorderSink
+        rec_path = os.path.join(self.conn.home, "calls",
+                                "call-%d.wav" % int(time.time()))
+        os.makedirs(os.path.dirname(rec_path), exist_ok=True)
+        call_id = self._voice().call_peer(
+            pid, source=ToneSource(440), sink=WavRecorderSink(rec_path))
+        self._emit("call placed: %s (recording -> %s)"
+                   % (call_id, rec_path))
+
+    @guard
+    def do_call_accept(self, arg):
+        """call-accept <call-id> — accept an incoming call."""
+        argv = self._argv(arg, 1, "call-accept <call-id>")
+        from acp_connector.voice import ToneSource, WavRecorderSink
+        rec_path = os.path.join(self.conn.home, "calls",
+                                "call-%d.wav" % int(time.time()))
+        os.makedirs(os.path.dirname(rec_path), exist_ok=True)
+        self._voice().accept_call(argv[0], source=ToneSource(440),
+                                  sink=WavRecorderSink(rec_path))
+        self._emit("call accepted: %s" % argv[0])
+
+    @guard
+    def do_call_reject(self, arg):
+        """call-reject <call-id> — decline an incoming call."""
+        argv = self._argv(arg, 1, "call-reject <call-id>")
+        self._voice().reject_call(argv[0])
+        self._emit("call rejected: %s" % argv[0])
+
+    @guard
+    def do_call_hangup(self, arg):
+        """call-hangup <call-id> — end a call."""
+        argv = self._argv(arg, 1, "call-hangup <call-id>")
+        self._voice().hangup_call(argv[0])
+        self._emit("call ended: %s" % argv[0])
+
+    # ------------------------------------------------------------- scheduler
+    @guard
+    def do_sched_once(self, arg):
+        """sched-once <unix-ts> <action> [args...] — run a task once."""
+        argv = self._argv(arg, 2, "sched-once <unix-ts> <action> [args...]")
+        tid = self.conn.scheduler.schedule_once(int(argv[0]), argv[1],
+                                                argv[2:])
+        self._emit("scheduled: %s" % tid)
+
+    @guard
+    def do_sched_every(self, arg):
+        """sched-every <seconds> <action> [args...] — repeat every N seconds."""
+        argv = self._argv(arg, 2, "sched-every <seconds> <action> [args...]")
+        tid = self.conn.scheduler.schedule_every(int(argv[0]), argv[1],
+                                                 argv[2:])
+        self._emit("scheduled: %s" % tid)
+
+    @guard
+    def do_sched_daily(self, arg):
+        """sched-daily <HH:MM> <action> [args...] — run daily at local time."""
+        argv = self._argv(arg, 2, "sched-daily <HH:MM> <action> [args...]")
+        tid = self.conn.scheduler.schedule_daily(argv[0], argv[1], argv[2:])
+        self._emit("scheduled: %s" % tid)
+
+    @guard
+    def do_sched_list(self, arg):
+        """sched-list — list scheduled tasks."""
+        tasks = self.conn.scheduler.list_tasks()
+        if not tasks:
+            self._emit("(no scheduled tasks)")
+            return
+        for t in tasks:
+            self._emit("%s  %-24s next=%s  args=%s"
+                       % (_short(t["task_id"]), t["action"],
+                          _fmt_ts(t.get("next_run", 0)),
+                          " ".join(str(a) for a in t.get("args", []))))
+
+    @guard
+    def do_sched_cancel(self, arg):
+        """sched-cancel <task-id-prefix> — cancel a scheduled task."""
+        argv = self._argv(arg, 1, "sched-cancel <task-id-prefix>")
+        prefix = argv[0]
+        matches = [t["task_id"] for t in self.conn.scheduler.list_tasks()
+                   if t["task_id"].startswith(prefix)]
+        if len(matches) != 1:
+            raise AcpError("NOT_FOUND",
+                           "task '%s' not found" % prefix)
+        self.conn.scheduler.cancel(matches[0])
+        self._emit("cancelled: %s" % _short(matches[0]))
+
+    # ------------------------------------------------------------ marketplace
+    @guard
+    def do_market_publish(self, arg):
+        """market-publish <dir> <name> <version> — sign and publish."""
+        argv = self._argv(arg, 3, "market-publish <dir> <name> <version>")
+        pkg_id = self._market().publish_package(argv[0], argv[1], argv[2],
+                                                description="")
+        self._emit("published package: %s" % pkg_id)
+
+    @guard
+    def do_market_search(self, arg):
+        """market-search <query> — search installed/local package index."""
+        argv = self._argv(arg, 1, "market-search <query>")
+        results = self._market().search_packages(argv[0])
+        if not results:
+            self._emit("(no packages match)")
+            return
+        for r in results:
+            self._emit("%s %s  %s" % (r.get("name"), r.get("version"),
+                                      r.get("description", "")[:60]))
+
+    @guard
+    def do_market_install(self, arg):
+        """market-install <name> [version] — verify and install a package."""
+        argv = self._argv(arg, 1, "market-install <name> [version]")
+        ver = argv[1] if len(argv) > 1 else None
+        where = self._market().install_package(argv[0], version=ver)
+        self._emit("installed to: %s" % where)
+
+    @guard
+    def do_market_offer(self, arg):
+        """market-offer <peer> <listing-id> <terms...> — make an offer."""
+        argv = self._argv(arg, 3, "market-offer <peer> <listing-id> <terms>")
+        oid = self._market().make_offer(self._resolve_pid(argv[0]),
+                                        argv[1], " ".join(argv[2:]))
+        self._emit("offer made: %s" % oid)
+
+    @guard
+    def do_market_accept(self, arg):
+        """market-accept <offer-id-prefix> — accept an offer (escrow held)."""
+        argv = self._argv(arg, 1, "market-accept <offer-id-prefix>")
+        prefix = argv[0]
+        matches = [o["offer_id"] for o in self._market().list_offers()
+                   if o["offer_id"].startswith(prefix)]
+        if len(matches) != 1:
+            raise AcpError("NOT_FOUND", "offer '%s' not found" % prefix)
+        self._market().accept_offer(matches[0])
+        self._emit("offer accepted (escrow held): %s" % _short(matches[0]))
+
+    @guard
+    def do_market_offers(self, arg):
+        """market-offers — list offers."""
+        offers = self._market().list_offers()
+        if not offers:
+            self._emit("(no offers)")
+            return
+        for o in offers:
+            self._emit("%s  %-10s  %s"
+                       % (_short(o["offer_id"]), o.get("state", "?"),
+                          o.get("listing_id", "")))
+
+    # ------------------------------------------------------------- dashboard
+    @guard
+    def do_dashboard(self, arg):
+        """dashboard [port] — start the local web dashboard (token auth)."""
+        argv = self._argv(arg)
+        port = int(argv[0]) if argv else 0
+        if self._dashboard is not None:
+            self._emit("dashboard already running.")
+            return
+        apps_dir = os.path.join(PROJ_ROOT, "apps")
+        if apps_dir not in sys.path:
+            sys.path.insert(0, apps_dir)
+        from acp_dashboard.server import Dashboard
+        self._dashboard = Dashboard(self.conn, port=port)
+        self._dashboard.start()
+        self._emit("dashboard at http://127.0.0.1:%d  token=%s"
+                   % (self._dashboard.port, self._dashboard.token))
+
+    # ------------------------------------------------------------- analytics
+    @guard
+    def do_analytics(self, arg):
+        """analytics [days] — show local usage counters (nothing leaves)."""
+        argv = self._argv(arg)
+        days = int(argv[0]) if argv else 30
+        s = self.conn.analytics.summary(days=days)
+        counters = (s or {}).get("counters", {})
+        if not counters or not any(counters.values()):
+            self._emit("(no counters yet)")
+            return
+        for name in sorted(counters):
+            self._emit("%-18s %d" % (name, counters[name]))
+
+    @guard
+    def do_analytics_report(self, arg):
+        """analytics-report <handle> — send today's counters to the directory
+        (opt-in; needs a set-api-key with analytics:write scope)."""
+        argv = self._argv(arg, 1, "analytics-report <handle>")
+        if not self._dir_url:
+            raise AcpError("INTERNAL", "register a directory first")
+        self.conn.analytics.report(self._dir_url, argv[0],
+                                   self.conn.identity.ed_priv,
+                                   api_key=self._api_key)
+        self._emit("analytics reported for '%s'." % argv[0])
+
+    # ---------------------------------------------------------------- api key
+    @guard
+    def do_set_api_key(self, arg):
+        """set-api-key <key> — set the Bearer key for directory/API routes."""
+        argv = self._argv(arg, 1, "set-api-key <key>")
+        self._api_key = argv[0]
+        self._emit("API key set (kept in memory only).")
+
 
 # ---------------------------------------------------------------------------
 # argparse
@@ -707,4 +1021,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Route through i18n_patch so `--lang <code>` is honored on every
+    # invocation (it parses --lang early, patches, then delegates here).
+    try:
+        import i18n_patch
+        sys.exit(i18n_patch.main())
+    except ImportError:
+        sys.exit(main())
