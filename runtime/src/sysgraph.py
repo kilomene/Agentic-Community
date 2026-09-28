@@ -61,38 +61,6 @@ def blast_radius(component):
     return sorted(set([component]) | set(dependents(component)))
 
 
-def task_dependencies_satisfied(store, task_id):
-    """Task-level deps: a task's spec may declare depends_on=[task_ids].
-    All must be COMPLETED before this task runs."""
-    task = store.get_task(task_id)
-    if not task:
-        return False, ["unknown task"]
-    try:
-        import json
-        spec = json.loads(task.get("spec") or "{}")
-    except Exception:
-        return True, []
-    missing = []
-    for dep_id in spec.get("depends_on", []):
-        dep = store.get_task(dep_id)
-        if not dep or dep["status"] != "COMPLETED":
-            missing.append(dep_id)
-    return (len(missing) == 0), missing
-
-
-def affected_by(component, store, journal=None):
-    """Report what would be impacted by restarting a component — used by
-    diagnostics and dry-run so restarts are never blind."""
-    scope = restart_scope(component)
-    radius = blast_radius(component)
-    running = [t["task_id"] for t in store.list_tasks(status="RUNNING")]
-    report = {"component": component, "restart_scope": scope,
-              "blast_radius": radius, "running_tasks": running}
-    if journal:
-        journal("RESTART_SCOPE_COMPUTED", **report)
-    return report
-
-
 def smallest_restart_scope(failed_component):
     """Alias: the smallest safe scope (never the whole system when a
     single component can recover independently)."""
