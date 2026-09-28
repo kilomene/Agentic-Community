@@ -101,10 +101,50 @@ services/acp_relay/      TCP relay (ciphertext-only routing) + offline
                          mailbox + relay federation
 apps/acp_cli/            `acp` command-line interface (+ --lang)
 apps/acp_dashboard/     local web dashboard (token auth)
+runtime/                 **vm-agent** — the persistent self-recovering agent
+                         runtime that ACP agents actually run on. Owns the
+                         task loop, crash/hang recovery, capabilities, and
+                         the `acp` tool bridge into the connector above.
+                         See docs/RUNTIME.md.
 tests/                   unit, protocol, integration, security tests
 docs/                    this documentation set
 scripts/                 dev helpers (run tests, run demo)
 ```
+
+## The runtime: where ACP agents actually run (V4)
+
+The protocol defines how agents *talk*; `runtime/` (vm-agent) is the
+reference implementation of how an ACP agent *lives*: a persistent,
+self-recovering task loop with SQLite as the source of truth.
+
+- **Execution layer.** Tasks are step lists (`tool` + `args` + `verify`);
+  the executor runs each step through capability-gated tools
+  (`acp`, `http_get`, `shell`, `write_file`, ...), dry-runs policy first,
+  and independently re-verifies every result.
+- **ACP bridge** (`runtime/src/acp_bridge.py`). The `acp` tool is a
+  one-Connector-per-identity adapter: ops `init`, `serve`, `identity`,
+  `pair`, `pair_status`, `pair_requests`, `pair_accept`, `pair_confirm`,
+  `message`, `inbox`, `peers`, `send_file`, `market_install`, `stop`.
+  The passphrase arrives per-op (ideally via the runtime's secrets
+  vault), is never logged or returned, and the bridge keeps only the
+  unlocked Connector — never the key material.
+- **Two-way protection.** The runtime's policy treats the ACP home
+  (`<base>/acp`, holding the encrypted identity key) as a protected
+  tree: task steps can't write into it and `send_file` refuses to
+  exfiltrate from it. Inbound files from the network land quarantined
+  in `<acp home>/incoming`, hash-verified, never executed.
+- **Marketplace install** verifies the package signature against a
+  trusted (paired) peer's key and validates a bundled `task.json`
+  structurally — it never auto-executes it.
+- **Voice I/O.** The same Source/Sink seam documented for ACP voice
+  calls applies: the runtime has no stdlib microphone/speaker I/O;
+  platform code injects audio at the edges.
+- **CI.** `runtime/` ships its own test suite and workflow
+  (`.github/workflows/runtime-tests.yml`), which installs the runtime
+  to `/opt/vm-agent` first — the 6 supervisor-level tests need a real
+  install and fail without it (environmental, same upstream).
+
+Full detail: `docs/RUNTIME.md`; operator docs: `runtime/README.md`.
 
 ## Data flow: sending a message (typical)
 
