@@ -1,0 +1,3 @@
+{
+  "tests/test_dashboard.py::DashboardTests::test_file_send_roundtrip": true
+}
