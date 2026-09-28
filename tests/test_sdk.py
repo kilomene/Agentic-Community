@@ -8,7 +8,6 @@ clear message (V1 does not ship acp_groups).
 import hashlib
 import os
 import sys
-import tempfile
 import threading
 import time
 
