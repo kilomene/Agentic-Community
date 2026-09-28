@@ -21,7 +21,7 @@ HKDF-SHA256 / ChaCha20-Poly1305 (pure-Python, RFC test vectors pass).
 **Core (V1)**
 - Agent connector with cryptographic identity (Ed25519 signing +
   X25519 encryption keypairs), passphrase-encrypted key storage
-- Secure pairing with single-use `PAIR-XXXX-XXXX` codes, mutual
+- Secure pairing with single-use 6-character codes, mutual
   challenge-response authentication
 - E2E-encrypted direct messaging with delivery acknowledgements
 - Online/offline presence; explicit permission system (pairing grants a
