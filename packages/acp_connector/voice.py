@@ -413,6 +413,16 @@ class VoiceCalls:
                         target=call_id, result="denied",
                         details={"codec": payload.get("codec")})
             return
+        # Parse BEFORE creating the socket: a malformed udp_port/ssrc
+        # must not leak a bound socket (the ValueError used to escape
+        # from inside the dict literal below, after bind()).
+        try:
+            remote_port = int(payload["udp_port"])
+            remote_ssrc = int(payload["ssrc"])
+        except (ValueError, TypeError):
+            raise AcpError("BAD_ENVELOPE", "call_invite ports not integers")
+        if not 1 <= remote_port <= 65535:
+            raise AcpError("BAD_ENVELOPE", "call_invite bad udp_port")
         with self._lock:
             if call_id in self._calls:
                 return  # duplicate invite; ignore
@@ -428,9 +438,9 @@ class VoiceCalls:
                 "call_id": call_id, "peer_id": peer,
                 "direction": "incoming", "state": "ringing",
                 "codec": CODEC, "sock": sock, "local_port": local_port,
-                "remote_port": int(payload["udp_port"]),
+                "remote_port": remote_port,
                 "local_ssrc": ssrc,
-                "remote_ssrc": int(payload["ssrc"]),
+                "remote_ssrc": remote_ssrc,
                 "peer_ip": self._peer_ip(conn),
                 "source": self.default_source, "sink": self.default_sink,
                 "stop": threading.Event(), "event": threading.Event(),
@@ -483,8 +493,14 @@ class VoiceCalls:
                 return
             if call["state"] != "calling":
                 return
-            call["remote_port"] = int(payload["udp_port"])
-            call["remote_ssrc"] = int(payload["ssrc"])
+            try:
+                remote_port = int(payload["udp_port"])
+                remote_ssrc = int(payload["ssrc"])
+            except (ValueError, TypeError):
+                raise AcpError("BAD_ENVELOPE",
+                               "call_accept ports not integers")
+            call["remote_port"] = remote_port
+            call["remote_ssrc"] = remote_ssrc
             call["peer_ip"] = self._peer_ip(conn)
             call["state"] = "active"
             call["last_signal"] = time.time()
@@ -596,7 +612,7 @@ class VoiceCalls:
             else:
                 next_t = time.monotonic()  # don't spiral when late
 
-    def _handle_rtp(self, call, data, buf):
+    def _handle_rtp(self, call, data):
         if len(data) != 12 + FRAME_BYTES:
             return None
         try:
@@ -619,7 +635,7 @@ class VoiceCalls:
         while not call["stop"].is_set():
             try:
                 data, _addr = sock.recvfrom(4096)
-                parsed = self._handle_rtp(call, data, buf)
+                parsed = self._handle_rtp(call, data)
                 if parsed is not None:
                     seq, payload = parsed
                     key = seq & 0xFFFF
