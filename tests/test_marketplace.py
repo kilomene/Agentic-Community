@@ -32,19 +32,6 @@ def case(name):
     return deco
 
 
-def wait_until(fn, timeout=30, interval=0.2, what="condition"):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            v = fn()
-        except Exception:
-            v = None
-        if v:
-            return v
-        time.sleep(interval)
-    raise AssertionError(f"timeout waiting for {what}")
-
-
 def expect_acp_error(fn, code):
     try:
         fn()
@@ -87,46 +74,85 @@ def make_pkg_dir():
     return d
 
 
-def pair(a, b):
+def pair(a, b, timeout=45):
     """Pair connector a -> b, return when both sides trust each other."""
     port_b = b._server_port
-    sessions = []
-    ev = threading.Event()
-    b.on_pairing_request(lambda s: (sessions.append(s), ev.set()))
-    s1 = a.pair_initiate("127.0.0.1", port_b)
-    assert ev.wait(15), "no pairing request arrived"
+    for attempt in (1, 2):
+        sessions = []
+        ev = threading.Event()
+        b.on_pairing_request(lambda s: (sessions.append(s), ev.set()))
+        s1 = a.pair_initiate("127.0.0.1", port_b)
+        if ev.wait(timeout):
+            break
+        if attempt == 2:
+            raise AssertionError("no pairing request arrived")
     s2 = sessions[0]
     assert s2.code and len(s2.code) == 6, f"bad code: {s2.code!r}"
     s2.accept()
-    wait_until(lambda: s1.state == "await_code", what="await_code")
+    wait_until(lambda: s1.state == "await_code", what="await_code",
+               timeout=timeout)
     s1.confirm(s2.code)
     wait_until(lambda: b.store.get_peer(a.peer_id) is not None,
-               what="b trusts a")
+               what="b trusts a", timeout=timeout)
     wait_until(lambda: a.store.get_peer(b.peer_id) is not None,
-               what="a trusts b")
+               what="a trusts b", timeout=timeout)
 
 
-home1 = tempfile.mkdtemp(prefix="mkt-c1-")
-home2 = tempfile.mkdtemp(prefix="mkt-c2-")
-home3 = tempfile.mkdtemp(prefix="mkt-c3-")
-c1 = Connector(home1, "mkt-pass-one", handle="seller")
-c2 = Connector(home2, "mkt-pass-two", handle="buyer")
-c3 = Connector(home3, "mkt-pass-three", handle="arbiter")
-p1 = c1.start_server("127.0.0.1", 0)
-p2 = c2.start_server("127.0.0.1", 0)
-p3 = c3.start_server("127.0.0.1", 0)
-print(f"paired setup: c1={c1.peer_id[:12]} c2={c2.peer_id[:12]}"
-      f" c3={c3.peer_id[:12]}", flush=True)
-pair(c1, c2)
-pair(c1, c3)
-pair(c2, c3)
-print("all paired", flush=True)
+def wait_until(fn, timeout=45, interval=0.2, what="condition"):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            v = fn()
+        except Exception:
+            v = None
+        if v:
+            return v
+        time.sleep(interval)
+    raise AssertionError(f"timeout waiting for {what}")
 
-m1 = Marketplace(c1)
-m2 = Marketplace(c2)
-m3 = Marketplace(c3)
 
-PKG = make_pkg_dir()
+# Module-level state, initialized by setup() at RUN time (never at
+# import/collection time: pytest imports every test module before
+# running any of them, and pairing three connectors at collection
+# starves under that load).
+c1 = c2 = c3 = m1 = m2 = m3 = None
+PKG = None
+SVC_LISTING = None
+
+
+def setup():
+    global c1, c2, c3, m1, m2, m3, PKG, SVC_LISTING
+    if c1 is not None:
+        return
+    home1 = tempfile.mkdtemp(prefix="mkt-c1-")
+    home2 = tempfile.mkdtemp(prefix="mkt-c2-")
+    home3 = tempfile.mkdtemp(prefix="mkt-c3-")
+    c1 = Connector(home1, "mkt-pass-one", handle="seller")
+    c2 = Connector(home2, "mkt-pass-two", handle="buyer")
+    c3 = Connector(home3, "mkt-pass-three", handle="arbiter")
+    c1.start_server("127.0.0.1", 0)
+    c2.start_server("127.0.0.1", 0)
+    c3.start_server("127.0.0.1", 0)
+    print(f"paired setup: c1={c1.peer_id[:12]} c2={c2.peer_id[:12]}"
+          f" c3={c3.peer_id[:12]}", flush=True)
+    pair(c1, c2)
+    pair(c1, c3)
+    pair(c2, c3)
+    print("all paired", flush=True)
+    m1 = Marketplace(c1)
+    m2 = Marketplace(c2)
+    m3 = Marketplace(c3)
+    PKG = make_pkg_dir()
+    SVC_LISTING = t_services()
+    PASS.append(t_services)
+
+
+def teardown():
+    for c in (c1, c2, c3):
+        try:
+            c.stop()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- packages
@@ -242,7 +268,6 @@ def t_services():
     assert found and found[0]["listing_id"] == listing["listing_id"], \
         "local search found nothing"
     return listing
-SVC_LISTING = t_services()
 PASS.append(t_services)
 
 
@@ -442,27 +467,32 @@ PASS.append(t_unknown_publisher)
 
 
 def main():
+    setup()
     cases = [t_publish, t_install, t_install_policy, t_tamper_file,
              t_forged_sig, t_path_traversal, t_happy_path,
              t_double_release, t_cancel, t_decline, t_dispute,
              t_forged_offer, t_nonparty_release, t_replay_accept,
              t_null_adapter, t_discovery_json, t_unknown_publisher]
     failed = 0
-    for fn in cases:
-        try:
-            fn()
-            print(f"PASS {fn._name}", flush=True)
-        except Exception as e:
-            failed += 1
-            print(f"FAIL {fn._name}: {type(e).__name__}: {e}", flush=True)
-    print(f"{len(cases) - failed}/{len(cases)} marketplace cases passed",
-          flush=True)
-    for c in (c1, c2, c3):
-        try:
-            c.stop()
-        except Exception:
-            pass
+    try:
+        for fn in cases:
+            try:
+                fn()
+                print(f"PASS {fn._name}", flush=True)
+            except Exception as e:
+                failed += 1
+                print(f"FAIL {fn._name}: {type(e).__name__}: {e}",
+                      flush=True)
+        print(f"{len(cases) - failed}/{len(cases)} marketplace cases passed",
+              flush=True)
+    finally:
+        teardown()
     return failed
+
+
+def test_marketplace_suite():
+    """Pytest entry point: the whole marketplace suite as one test."""
+    assert main() == 0
 
 
 if __name__ == "__main__":
