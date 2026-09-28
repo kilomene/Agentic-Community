@@ -21,10 +21,6 @@ from acp_marketplace.manifest import (build_manifest, sign_manifest,
 from acp_marketplace.payments import NullAdapter, PaymentAdapter
 from acp_crypto import generate_ed25519_keypair
 
-PASS = []
-FAIL = []
-
-
 def case(name):
     def deco(fn):
         fn._name = name
@@ -144,7 +140,6 @@ def setup():
     m3 = Marketplace(c3)
     PKG = make_pkg_dir()
     SVC_LISTING = t_services()
-    PASS.append(t_services)
 
 
 def teardown():
@@ -171,7 +166,6 @@ def t_publish():
     names = [l["name"] for l in resp["listings"] if l["type"] == "package"]
     assert "summarizer" in names, resp["listings"]
     json.dumps(resp)  # listings are JSON-serializable
-PASS.append(t_publish)
 
 
 @case("install verifies sig + sha256, quarantines, never executes")
@@ -192,7 +186,6 @@ def t_install():
     # manifest.json rides along
     assert os.path.isfile(os.path.join(receipt["installed"],
                                        "manifest.json"))
-PASS.append(t_install)
 
 
 @case("install without explicit approval is POLICY_DENIED")
@@ -201,7 +194,6 @@ def t_install_policy():
     expect_acp_error(
         lambda: m2.install_package("summarizer", from_peer=c1.peer_id),
         "POLICY_DENIED")
-PASS.append(t_install_policy)
 
 
 @case("tampered package file -> install refused (sha256 mismatch)")
@@ -214,7 +206,6 @@ def t_tamper_file():
         lambda: m2.install_package("tamperme", from_peer=c1.peer_id,
                                    approve=True),
         "FILE_HASH_MISMATCH")
-PASS.append(t_tamper_file)
 
 
 @case("forged publisher sig -> install refused")
@@ -228,7 +219,6 @@ def t_forged_sig():
     expect_acp_error(
         lambda: m2.install_package("forgeme", approve=True),
         "INVALID_SIG")
-PASS.append(t_forged_sig)
 
 
 @case("path traversal in package file paths -> refused")
@@ -249,7 +239,6 @@ def t_path_traversal():
             assert e.code == "FILE_REJECTED", e.code
         else:
             raise AssertionError(f"{hostile!r} not rejected")
-PASS.append(t_path_traversal)
 
 
 @case("service listings publish, sign, and serve over market_list")
@@ -268,7 +257,6 @@ def t_services():
     assert found and found[0]["listing_id"] == listing["listing_id"], \
         "local search found nothing"
     return listing
-PASS.append(t_services)
 
 
 # ------------------------------------------------------------ transactions
@@ -300,7 +288,6 @@ def t_happy_path():
     assert m2.get_offer(offer_id)["state"] == "released"
     st = m1.get_adapter("null").get_status(hold_id)
     assert st["state"] == "released"
-PASS.append(t_happy_path)
 
 
 @case("escrow double-release -> second fails ALREADY_SETTLED")
@@ -326,7 +313,6 @@ def t_double_release():
                       "currency": "USD"})
     time.sleep(1.0)
     assert m2.get_offer(offer_id)["state"] == "released"
-PASS.append(t_double_release)
 
 
 @case("escrow cancel path settles to cancelled")
@@ -339,7 +325,6 @@ def t_cancel():
     assert st["state"] == "cancelled"
     expect_acp_error(lambda: m2.escrow_cancel(offer_id, reason="x"),
                      "ALREADY_SETTLED")
-PASS.append(t_cancel)
 
 
 @case("decline path settles to declined")
@@ -351,7 +336,6 @@ def t_decline():
     m1.decline_offer(offer_id, reason="too cheap")
     wait_until(lambda: m2.get_offer(offer_id)["state"] == "declined",
                what="buyer sees declined")
-PASS.append(t_decline)
 
 
 @case("dispute: open from escrow_held, arbiter resolves to refund")
@@ -369,7 +353,6 @@ def t_dispute():
                what="buyer sees refund")
     st = m2.get_adapter("null").get_status(hold_id)
     assert st["state"] == "cancelled"
-PASS.append(t_dispute)
 
 
 @case("forged market_offer signature -> rejected, never recorded")
@@ -383,7 +366,6 @@ def t_forged_offer():
     c1._get_conn(c2.peer_id).send_env(env)
     wait_for_audit(c2, "envelope.rejected", code="INVALID_SIG")
     assert m2.get_offer("f" * 32) is None, "forged offer was recorded!"
-PASS.append(t_forged_offer)
 
 
 @case("release by non-party -> rejected (POLICY_DENIED)")
@@ -404,7 +386,6 @@ def t_nonparty_release():
     # offer untouched: still escrow_held
     assert m2.get_offer(offer_id)["state"] == "escrow_held", \
         m2.get_offer(offer_id)["state"]
-PASS.append(t_nonparty_release)
 
 
 @case("replayed market_offer_accept -> dropped, no state change")
@@ -421,7 +402,6 @@ def t_replay_accept():
     c1._send_e2e(MARKET_OFFER_ACCEPT, c2.peer_id, {"offer_id": offer_id})
     wait_for_audit(c2, "marketplace.offer.accept_replay")
     assert m2.get_offer(offer_id)["state"] == "accepted"
-PASS.append(t_replay_accept)
 
 
 @case("NullAdapter: idempotent create, honest no-money bookkeeping")
@@ -438,7 +418,6 @@ def t_null_adapter():
     # docstrings say the honest part out loud
     assert "moves no money" in (NullAdapter.create_hold.__doc__ or "").lower()
     assert "no money" in (NullAdapter.__doc__ or "").lower()
-PASS.append(t_null_adapter)
 
 
 @case("discovery hooks are JSON-serializable")
@@ -450,7 +429,6 @@ def t_discovery_json():
     json.dumps(man)
     receipt = m1.install_package("summarizer", approve=True)
     json.dumps(receipt)
-PASS.append(t_discovery_json)
 
 
 @case("unknown publisher -> install refused")
@@ -463,7 +441,6 @@ def t_unknown_publisher():
                          "no-such-peer-id")
     expect_acp_error(lambda: m2.install_package("stranger", approve=True),
                      "UNKNOWN_SENDER")
-PASS.append(t_unknown_publisher)
 
 
 def main():
