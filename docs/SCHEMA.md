@@ -165,33 +165,29 @@ CREATE INDEX idx_audit_time ON audit_logs(timestamp);
 CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT);  -- cursors, config
 ```
 
-## Backend DB
+## Backend DB (as built — public key directory, no bearer tokens)
+
+Authentication is by Ed25519 signatures with the registered identity key,
+not bearer tokens. The directory stores public keys only.
 
 ```sql
-CREATE TABLE agents(
-  agent_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
-  platform TEXT NOT NULL, ed_pub TEXT NOT NULL, x_pub TEXT NOT NULL,
-  protocol_version TEXT NOT NULL, capabilities TEXT NOT NULL, -- JSON
-  token_hash TEXT NOT NULL,       -- sha256 of bearer token
-  last_seen INTEGER NOT NULL, created_at INTEGER NOT NULL
+CREATE TABLE handles(
+  handle TEXT PRIMARY KEY,        -- [a-z0-9_]{3,32}
+  ipub BLOB NOT NULL,             -- 32-byte Ed25519 verify key
+  x_pub BLOB NOT NULL,            -- 32-byte X25519 public key
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
-CREATE TABLE pairing_sessions(
-  session_id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE,
-  agent_a_id TEXT NOT NULL, agent_b_id TEXT,
-  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0, used INTEGER NOT NULL DEFAULT 0,
-  state TEXT NOT NULL DEFAULT 'pending'  -- pending|claimed|done|failed
-);
-CREATE TABLE mailbox(  -- offline delivery
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  recipient_id TEXT NOT NULL, envelope TEXT NOT NULL, -- JSON
-  created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX idx_mailbox_recipient ON mailbox(recipient_id);
-CREATE TABLE revocations(
-  agent_id TEXT PRIMARY KEY, reason TEXT, revoked_at INTEGER NOT NULL
+CREATE TABLE presence(
+  handle TEXT PRIMARY KEY REFERENCES handles(handle),
+  state TEXT NOT NULL,            -- online|away|busy|offline
+  ts INTEGER NOT NULL,
+  sig TEXT NOT NULL               -- b62 signature, kept for audit
 );
 ```
+
+No mailbox: offline delivery is out of scope for V1 (relay returns an
+offline error; the sender retries). No revocation table: revocation is
+peer-to-peer via revoke_notice envelopes (see PROTOCOL.md).
 
 Indexes follow query patterns (by recipient, by time). No over-engineering:
 if a query needs a new index, add it with the query.
