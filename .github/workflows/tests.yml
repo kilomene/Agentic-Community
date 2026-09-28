@@ -3,8 +3,24 @@ name: acp-tests
 on:
   push:
     branches: [main]
+    paths:
+      - 'packages/**'
+      - 'services/**'
+      - 'apps/**'
+      - 'tests/**'
+      - 'docs/PROTOCOL.md'
+      - 'docs/SCHEMA.md'
+      - 'proof_e2e.py'
   pull_request:
     branches: [main]
+    paths:
+      - 'packages/**'
+      - 'services/**'
+      - 'apps/**'
+      - 'tests/**'
+      - 'docs/PROTOCOL.md'
+      - 'docs/SCHEMA.md'
+      - 'proof_e2e.py'
 
 jobs:
   test:
