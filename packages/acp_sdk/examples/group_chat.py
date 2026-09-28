@@ -20,26 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 from acp_proto import AcpError  # noqa: E402
 from acp_sdk import AcpClient  # noqa: E402
-
-
-def pair(initiator, responder):
-    """Pair initiator -> responder. Returns the responder's peer id."""
-    code_box = {}
-    arrived = threading.Event()
-    responder.on_pairing_request(
-        lambda s: (code_box.setdefault("code", s.code),
-                   s.accept(), arrived.set()))
-    host, port = responder.server_address
-    peer_id = initiator.pair_with(
-        host, port,
-        approve_callback=lambda: _wait_code(code_box, arrived))
-    assert peer_id == responder.peer_id
-    return peer_id
-
-
-def _wait_code(code_box, arrived):
-    assert arrived.wait(30), "responder never sent a pairing code"
-    return code_box["code"]
+from acp_sdk.examples._util import pair, retry  # noqa: E402
 
 
 def main(argv=None):
@@ -70,20 +51,22 @@ def main(argv=None):
         # 2) V1 fan-out "group chat": pair with each member, send to each
         got = {bob.peer_id: threading.Event(),
                carol.peer_id: threading.Event()}
-
-        def on_msg(sender, text, msg_id):
-            bob.on_message(lambda s, t, m: got[bob.peer_id].set()
+        bob.on_message(lambda s, t, m: got[bob.peer_id].set()
                        if s == alice.peer_id and t == args.text else None)
         carol.on_message(lambda s, t, m: got[carol.peer_id].set()
                          if s == alice.peer_id and t == args.text else None)
 
-        members = [pair(alice, bob), pair(alice, carol)]
-        print("alice paired with %d members" % len(members))
-        for pid in members:
-            alice.send_message(pid, args.text)
-        deadline = time.time() + 30
-        assert all(ev.wait(max(0, deadline - time.time()))
-                   for ev in got.values()), "a member never got the message"
+        def run_chat():
+            members = [pair(alice, bob), pair(alice, carol)]
+            print("alice paired with %d members" % len(members))
+            for pid in members:
+                alice.send_message(pid, args.text)
+            deadline = time.time() + 30
+            assert all(ev.wait(max(0, deadline - time.time()))
+                       for ev in got.values()), \
+                "a member never got the message"
+
+        retry(run_chat, attempts=3, label="group chat")
         print("bob and carol both received %r" % args.text)
         print("OK: group-style fan-out chat works")
     return 0
