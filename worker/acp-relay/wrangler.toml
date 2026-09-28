@@ -1,0 +1,10 @@
+name = "acp-relay"
+main = "src/index.js"
+compatibility_date = "2024-09-25"   # Ed25519 WebCrypto needs a recent date
+
+[durable_objects]
+bindings = [{ name = "ACP_RELAY", class_name = "AcpRelay" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AcpRelay"]
