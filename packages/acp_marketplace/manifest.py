@@ -36,7 +36,7 @@ import os
 import time
 
 from acp_crypto import ed25519_sign, ed25519_verify
-from acp_proto import AcpError, b62decode, b62encode, canonical
+from acp_proto import AcpError, b62decode_fixed, b62encode_fixed, canonical
 from acp_connector.files import sanitize_filename
 
 REQUIRED_FIELDS = ("name", "version", "description", "capabilities",
@@ -120,7 +120,7 @@ def sign_manifest(manifest, ed_priv):
     """Return a copy of manifest with a publisher Ed25519 signature."""
     unsigned = {k: v for k, v in manifest.items() if k != "sig"}
     signed = dict(unsigned)
-    signed["sig"] = b62encode(ed25519_sign(ed_priv, canonical(unsigned)))
+    signed["sig"] = b62encode_fixed(ed25519_sign(ed_priv, canonical(unsigned)))
     return signed
 
 
@@ -150,7 +150,7 @@ def verify_manifest(manifest, get_pubkey):
                        f"unknown publisher {manifest['publisher_id'][:16]}")
     unsigned = {k: v for k, v in manifest.items() if k != "sig"}
     try:
-        sig = b62decode(manifest["sig"])
+        sig = b62decode_fixed(manifest["sig"])
     except (ValueError, KeyError):
         raise AcpError("BAD_ENVELOPE", "bad manifest sig encoding")
     if not ed25519_verify(vkey, canonical(unsigned), sig):
