@@ -68,6 +68,24 @@ class SchedulerTests(unittest.TestCase):
         finally:
             c.stop()
 
+    def test_daily_schedules(self):
+        c, _ = make_connector()
+        try:
+            # schedule_daily should accept a valid HH:MM and create a task
+            c.scheduler.register_action("test_daily", lambda: None)
+            tid = c.scheduler.schedule_daily("23:59", "test_daily", [])
+            self.assertTrue(tid)
+            tasks = c.scheduler.list_tasks()
+            self.assertTrue(any(t["task_id"] == tid for t in tasks))
+            # invalid time rejected
+            with self.assertRaises(AcpError):
+                c.scheduler.schedule_daily("25:00", "test_daily", [])
+            with self.assertRaises(AcpError):
+                c.scheduler.schedule_daily("nope", "test_daily", [])
+            c.scheduler.cancel(tid)
+        finally:
+            c.stop()
+
     def test_cancel(self):
         c, _ = make_connector()
         try:
@@ -81,7 +99,7 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(fired, [], "cancelled task fired!")
             # list should not contain it
             tasks = c.scheduler.list_tasks()
-            self.assertFalse(any(t["id"] == tid for t in tasks))
+            self.assertFalse(any(t["task_id"] == tid for t in tasks))
         finally:
             c.stop()
 
