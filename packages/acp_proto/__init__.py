@@ -73,14 +73,36 @@ KEY_ROTATE = "key_rotate"
 REVOKE_NOTICE = "revoke_notice"
 ERROR = "error"
 
-E2E_KINDS = frozenset({
+E2E_KINDS = {
     PAIR_CONFIRM, PAIR_WELCOME, MSG, MSG_ACK,
     FILE_OFFER, FILE_ACCEPT, FILE_REJECT, FILE_CHUNK, FILE_DONE, FILE_ACK,
-})
+}
 
-ALL_KINDS = frozenset({
+ALL_KINDS = {
     PAIR_REQUEST, PAIR_CHALLENGE, PRESENCE, KEY_ROTATE, REVOKE_NOTICE, ERROR,
-} | E2E_KINDS)
+} | E2E_KINDS
+
+
+def register_kind(name, e2e=False, schema=()):
+    """Extension hook for V2+ message kinds (backward compatible).
+
+    Registers a new protocol kind at runtime so V2+ modules (groups,
+    voice, marketplace, ...) can add message types without editing this
+    file. Unknown fields remain ignored per PROTOCOL.md §10. The sets
+    are mutated in place so ``from acp_proto import ALL_KINDS`` holders
+    (e.g. the connector) see new kinds immediately.
+    """
+    import re as _re
+    if not isinstance(name, str) or not _re.match(r"^[a-z][a-z0-9_]{1,40}$",
+                                                  name):
+        raise AcpError("BAD_ENVELOPE", "bad kind name: %r" % (name,))
+    if name in ALL_KINDS:
+        return name  # idempotent
+    ALL_KINDS.add(name)
+    if e2e:
+        E2E_KINDS.add(name)
+    PAYLOAD_SCHEMA[name] = tuple(schema)
+    return name
 
 # Required payload fields per kind (after decryption for E2E kinds)
 PAYLOAD_SCHEMA = {
