@@ -92,12 +92,6 @@ def classify(source, kind):
     return RULES.get((source, kind), RULES[("unknown", "unknown")])
 
 
-def backoff_for(cls, attempt, base):
-    if attempt < 0:
-        return 0
-    return min(base * (2 ** attempt), 300)
-
-
 def should_retry(source, kind, attempt):
     """attempt is 0-based count of retries already used."""
     cls, max_r, base, _ = classify(source, kind)
