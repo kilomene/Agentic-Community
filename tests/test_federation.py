@@ -169,6 +169,54 @@ class FederationTests(unittest.TestCase):
             relay_mod.graceful_shutdown(r1, t1)
             relay_mod.graceful_shutdown(r2, t2)
 
+    def test_tampered_hops_dropped(self):
+        from acp_proto import b62encode as b62e
+        r1, t1, d1 = make_relay()
+        r2, t2, d2 = make_relay()
+        try:
+            federate(r1, d1, r2, d2)
+            p1 = r1.server_address[1]
+            p2 = r2.server_address[1]
+            a_priv, a_pid = gen_pid()
+            b_priv, b_pid = gen_pid()
+            ca, _ = relay_mod.RelayClient.connect("127.0.0.1", p1, a_priv)
+            cb, _ = relay_mod.RelayClient.connect("127.0.0.1", p2, b_priv)
+            try:
+                wait_until(lambda: r2.federation.route_for(a_pid) is not None,
+                           timeout=30, what="route a->r2")
+                wait_until(lambda: r1.federation.route_for(b_pid) is not None,
+                           timeout=30, what="route b->r1")
+                # Craft a fed_forward with tampered hops=99, send it
+                # directly on r1's link to r2.
+                frame = msg_frame(a_priv, a_pid, b_pid, "tampered hops")
+                link = list(r1.federation.links().values())[0]
+                link.send_obj({"fed_forward": {"hops": 99,
+                                               "frame": b62e(frame)}})
+                # r2 must drop it: audit fed.forward_dropped, and B
+                # must NOT receive the frame.
+                def dropped():
+                    try:
+                        with open(os.path.join(d2, "relay_audit.log")) as f:
+                            return "fed.forward_dropped" in f.read()
+                    except FileNotFoundError:
+                        return False
+                wait_until(dropped, timeout=15,
+                           what="fed.forward_dropped audit")
+                # B should get nothing (short timeout)
+                cb.sock.settimeout(3)
+                try:
+                    got = cb.recv_frame(timeout=3)
+                    self.fail("B received a frame that should have been "
+                              "dropped: %r" % (got[:50],))
+                except Exception:
+                    pass  # timeout = good, nothing delivered
+            finally:
+                ca.close()
+                cb.close()
+        finally:
+            relay_mod.graceful_shutdown(r1, t1)
+            relay_mod.graceful_shutdown(r2, t2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
