@@ -49,7 +49,7 @@ PASS = []
 FAIL = []
 
 
-def test(name):
+def case(name):
     def deco(fn):
         fn._name = name
         return fn
@@ -156,7 +156,7 @@ def alice_x_pub():
 
 
 # ------------------------------------------------------------------ 1. forge
-@test("1. forged signature -> INVALID_SIG")
+@case("1. forged signature -> INVALID_SIG")
 def t_forged_signature():
     env = make_e2e_envelope(
         MSG, alice.peer_id, bob.peer_id,
@@ -186,7 +186,7 @@ def t_forged_signature():
 
 
 # ------------------------------------------------------------------ 2. replay
-@test("2. replay -> REPLAY, no duplicate delivery")
+@case("2. replay -> REPLAY, no duplicate delivery")
 def t_replay():
     msg_id = "m-replay-" + os.urandom(4).hex()
     env = make_e2e_envelope(
@@ -219,7 +219,7 @@ def t_replay():
 
 
 # ---------------------------------------------------------- 3. wrong code
-@test("3. wrong pairing code -> PAIRING_FAILED, no peer stored")
+@case("3. wrong pairing code -> PAIRING_FAILED, no peer stored")
 def t_wrong_code():
     hd, he = make_home("acp-atk-d-"), make_home("acp-atk-e-")
     dave = Connector(hd, "atk-pass-d", handle="atk-dave")
@@ -252,7 +252,7 @@ def t_wrong_code():
 
 
 # ---------------------------------------------------------- 4. MITM keys
-@test("4. MITM key substitution -> handshake fails, nobody trusted")
+@case("4. MITM key substitution -> handshake fails, nobody trusted")
 def t_mitm():
     hf, hg = make_home("acp-atk-f-"), make_home("acp-atk-g-")
     frank = Connector(hf, "atk-pass-f", handle="atk-frank")
@@ -327,7 +327,7 @@ def t_mitm():
 
 
 # ---------------------------------------------------------- 5. chunk tamper
-@test("5. tampered file chunk -> FILE_HASH_MISMATCH, file not delivered")
+@case("5. tampered file chunk -> FILE_HASH_MISMATCH, file not delivered")
 def t_chunk_tamper():
     content = b"ACP-ATTACK-PAYLOAD:" * 4096  # 77824 bytes -> 3 chunks
     src = os.path.join(home_a, "attack.bin")
@@ -414,7 +414,7 @@ def _send_file_catch():
 
 
 # ---------------------------------------------------------- 6. escalation
-@test("6. permission escalation -> POLICY_DENIED + audit entry")
+@case("6. permission escalation -> POLICY_DENIED + audit entry")
 def t_permission_escalation():
     # bob holds only the default pairing grants: no family_read
     assert not alice.permissions.has(bob.peer_id, "family_read"), \
@@ -429,7 +429,7 @@ def t_permission_escalation():
 
 
 # ---------------------------------------------------------- 7. expired
-@test("7. expired envelope -> EXPIRED")
+@case("7. expired envelope -> EXPIRED")
 def t_expired():
     env = make_envelope(PRESENCE, alice.peer_id, bob.peer_id,
                         {"state": "online"}, alice.identity.ed_priv,
@@ -445,7 +445,7 @@ def t_expired():
 
 
 # ---------------------------------------------------------- 8. unknown sender
-@test("8. unknown sender -> UNKNOWN_SENDER")
+@case("8. unknown sender -> UNKNOWN_SENDER")
 def t_unknown_sender():
     u_priv, u_pub = generate_ed25519_keypair()
     u_pid = b62encode(u_pub)
@@ -458,7 +458,7 @@ def t_unknown_sender():
 
 
 # ---------------------------------------------------------- 9. wrong recipient
-@test("9. E2E to wrong recipient -> DECRYPT_FAIL")
+@case("9. E2E to wrong recipient -> DECRYPT_FAIL")
 def t_wrong_recipient():
     hc = make_home("acp-atk-c-")
     carol = Connector(hc, "atk-pass-c", handle="atk-carol")
@@ -515,7 +515,7 @@ def t_wrong_recipient():
 
 
 # ---------------------------------------------------------- 10. oversized
-@test("10. oversized file -> FILE_TOO_LARGE before transfer")
+@case("10. oversized file -> FILE_TOO_LARGE before transfer")
 def t_oversized_file():
     alice.set_file_size_cap(1024)
     big = os.path.join(home_a, "big.bin")
@@ -542,7 +542,7 @@ def t_oversized_file():
 
 
 # ---------------------------------------------------------- 11. relay
-@test("11. relay sees metadata only; E2E box stays opaque")
+@case("11. relay sees metadata only; E2E box stays opaque")
 def t_relay_visibility():
     import relay as relay_mod  # noqa: E402
 
