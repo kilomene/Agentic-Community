@@ -89,6 +89,31 @@ For confidential message types the `payload` is replaced by:
 - Recipient recomputes with its own X25519 private key + `eph_pub`.
 - Decryption failure → `ERROR(INTEGRITY_FAILED)`; the message is dropped.
 
+*Implementation note (post-V1): the byte fields above are transmitted
+with length-prefixed base62 (§3.3), not hex — `eph_pub`, `nonce`, `ct`
+are b62fixed strings. The crypto construction is unchanged.*
+
+### 3.3 Binary encoding: length-prefixed base62 (b62fixed)
+
+Envelope fields that carry raw bytes (`ct`, `nonce`, `eph_pub`, `sig`,
+`key`, file `chunk` data, relay-forwarded `frame` bytes) use
+**length-prefixed base62**, `"b62encode_fixed"`:
+
+```
+b62encode_fixed(raw) = f"{len(raw)}:{b62encode(raw)}"
+```
+
+Example: `b62encode_fixed(b"\x00\x01\x02")` → `"3:102"`.
+
+Rationale: plain base62 is a big-integer encoding and silently drops
+leading zero bytes, which corrupts ~1/256 random signatures, ciphertexts,
+and nonces. The length prefix makes decoding exact: `b62decode_fixed`
+restores precisely `len(raw)` bytes (left-padded with zeros). Decoders
+MUST reject a payload whose declared length disagrees with its decoded
+length. Plain (unprefixed) base62 remains legal **only** for opaque
+identifier strings that are never decoded back to bytes (e.g. `peer_id`,
+`relay_id`, `task_id`), where the round-trip property is not needed.
+
 ## 4. Framing
 
 Over TCP: `struct.pack(">I", len(frame)) + frame`, where frame is the
@@ -238,9 +263,61 @@ compatibility; connectors MUST reject `major != 1` with
 `INTERNAL`. Error payload: `{code, message, request_id?}` where
 `request_id` echoes the offending `message_id` when known.
 
-## 12. What is NOT in V1
+## 12. Delivered after V1 (V2/V3/V4)
 
-E2E-encrypted group messaging, WebRTC/QUIC transports, voice/video,
-public directory, reputation, multi-device identity, key rotation
-protocol (keys can be re-registered manually). Marked NOT IN V1 wherever
-they arise; never faked.
+These were "NOT IN V1" and are now implemented. V1 connectors ignore
+unknown kinds per §1 (forward compatibility).
+
+- **V2 — E2E group messaging** (`packages/acp_connector/groups.py`):
+  sender-key groups; adding/removing a member rotates the epoch key so
+  removed members cannot read new messages. Kinds: `group_create`,
+  `group_key` (E2E), `group_msg` (sender-key encrypted payload),
+  `group_member_add`, `group_member_remove`, `group_leave`,
+  `group_admin_transfer`.
+- **V2 — voice calls** (`packages/acp_connector/voice.py`): E2E call
+  signaling `call_invite` / `call_accept` / `call_reject` / `call_hangup`
+  (E2E) + `call_keepalive` (plain); media is UDP RTP-style
+  (12-byte header + 320-byte PCM16/8 kHz frames), codec `pcm16/8000`.
+- **V2 — offline mailbox** (`services/acp_relay/mailbox.py`): SQLite
+  store-and-forward for envelopes addressed to offline agents; caps
+  1000 envelopes / 25 MiB per recipient, 7-day TTL, ack-based redelivery.
+  (Not a new ACP kind — it stores any envelope bytes.)
+- **V2 — relay federation** (`services/acp_relay/federation.py`):
+  relay-to-relay control frames `relay_link` / `relay_link_accept`
+  (Ed25519-signed, allowlisted via `trusted_relays.json`),
+  `relay_announce` / `relay_withdraw` (pid→relay routing, 600 s
+  freshness), `fed_forward` (`{"hops", "frame"}` — max 3 hops;
+  the inner ACP envelope is untouched, signatures stay verifiable).
+- **V2 — scheduler** (`packages/acp_connector/scheduler.py`):
+  connector-local cron (`schedule_once` / `schedule_every` /
+  `schedule_daily`, SQLite-persisted). Closed action allowlist —
+  connector operations or app-registered callbacks; never shell.
+- **V3 — registry search, identity verification, analytics, public API**
+  (`services/acp_api/`): signed listings with cursor pagination,
+  verification authority with badge issue/revoke, aggregate analytics
+  with CSV export, Bearer API keys with scopes + token-bucket rate
+  limits (429). All over the existing REST API — no new ACP kinds.
+- **V3 — dashboard + i18n** (`apps/acp_dashboard/`, `packages/acp_i18n/`):
+  local stdlib-HTTP dashboard (token auth, drives a real Connector)
+  and 133-string × 6-locale (en, es, fr, de, zh, yo) CLI/dashboard
+  translations.
+- **V3 — Python SDK** (`packages/acp_sdk/`): `AcpClient` + directory
+  client + runnable examples.
+- **V4 — marketplace** (`packages/acp_marketplace/`): signed capability
+  packages (publish/verify/install with quarantine), 12 E2E market
+  kinds (`market_list`, `market_listings`, `market_fetch`,
+  `market_package`, `market_offer`, `market_offer_accept`,
+  `market_offer_decline`, `market_escrow_hold`, `market_escrow_release`,
+  `market_escrow_cancel`, `market_dispute_open`,
+  `market_dispute_resolve`), offer→escrow→release state machine, third-
+  party dispute arbitration. Payments are bookkeeping-only
+  (`NullAdapter`) — there is no real-money rail.
+- **V4 — hardware agents** (`packages/acp_hwagent/`): device
+  attestation/binding protocol + a software `VirtualDevice` reference
+  implementation (honestly labeled: not a secure element).
+
+Still not built (stated plainly, not faked): WebRTC/QUIC transports,
+native mobile/desktop apps (see `docs/SDK_MOBILE_ROADMAP.md`), real
+payment rails, multi-device identity, microphone/speaker I/O in stdlib
+(the voice pipeline's Source/Sink seam is documented for platform
+code to fill).
