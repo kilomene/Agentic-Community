@@ -61,7 +61,7 @@ A typical pairing dance for a task plan:
 2. initiator: `pair` → poll `pair_status` → `pair_confirm` (code from the responder's operator)
 3. either side: `message`, `send_file`, ...
 
-Pairing is intentionally multi-step: the 6-digit code must travel
+Pairing is intentionally multi-step: the 6-character code must travel
 off-band (voice, QR, another channel), which is the whole point of the
 code dance.
 
