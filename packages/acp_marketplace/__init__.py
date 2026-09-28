@@ -157,19 +157,6 @@ class Marketplace:
         self._install_cb = cb
 
     # ----------------------------------------------------- waiter machinery
-    def _wait_for(self, key, timeout):
-        waiter = {"event": threading.Event(), "payload": None}
-        with self._lock:
-            self._waiters[key] = waiter
-        try:
-            if not waiter["event"].wait(timeout):
-                raise AcpError("INTERNAL",
-                               f"timeout waiting for {key[0]}")
-            return waiter["payload"]
-        finally:
-            with self._lock:
-                self._waiters.pop(key, None)
-
     def _fulfill(self, key, payload):
         with self._lock:
             w = self._waiters.get(key)
@@ -246,7 +233,12 @@ class Marketplace:
     def _h_market_list(self, conn, env, payload):
         query = payload.get("query") or ""
         capability = payload.get("capability")
-        cursor = int(payload.get("cursor") or 0)
+        try:
+            cursor = int(payload.get("cursor") or 0)
+        except (ValueError, TypeError):
+            raise AcpError("BAD_ENVELOPE", "market_list cursor not integer")
+        if cursor < 0:
+            raise AcpError("BAD_ENVELOPE", "market_list negative cursor")
         pkgs, _ = self.list_packages(query=query, capability=capability,
                                      cursor=cursor)
         svcs = self.store.list_services(query=query, capability=capability,
@@ -333,7 +325,6 @@ class Marketplace:
         """Fetch a package from a peer over ACP. Returns
         (manifest, {path: bytes}) after verifying publisher signature
         and every file sha256."""
-        from acp_proto import b62decode_fixed as _b62d
         key = (MARKET_PACKAGE, peer_pid, name)
         waiter = {"event": threading.Event(), "payload": None}
         with self._lock:
@@ -356,7 +347,7 @@ class Marketplace:
         manifest = verify_manifest(resp["manifest"], self._pubkey)
         files_by_path = {}
         for f in resp["files"]:
-            files_by_path[f["path"]] = _b62d(f["content"])
+            files_by_path[f["path"]] = b62decode_fixed(f["content"])
         verify_package_files(manifest, files_by_path)
         # Cache the verified manifest in the local index so the package
         # is discoverable/installable locally afterwards.
@@ -418,9 +409,11 @@ class Marketplace:
                 f.write(data)
         # re-verify from quarantine bytes (what we install is what we
         # verified)
-        qfiles = {e["path"]: open(os.path.join(
-            qdir, _check_path(e["path"])), "rb").read()
-            for e in manifest["files"]}
+        qfiles = {}
+        for e in manifest["files"]:
+            with open(os.path.join(qdir, _check_path(e["path"])),
+                      "rb") as f:
+                qfiles[e["path"]] = f.read()
         verify_package_files(manifest, qfiles)
 
         # 3. policy gate: explicit local action required
@@ -656,9 +649,13 @@ class Marketplace:
     def _record_counterparty_hold(self, offer_id, payload):
         hold_id = payload["hold_id"]
         if self.store.get_hold(hold_id) is None:
+            try:
+                amount = int(payload["amount_cents"])
+            except (ValueError, TypeError):
+                raise AcpError("BAD_ENVELOPE",
+                               "escrow_hold amount not an integer")
             self.store.add_hold(hold_id, offer_id, payload["adapter"],
-                                int(payload["amount_cents"]),
-                                payload["currency"], state="held")
+                                amount, payload["currency"], state="held")
 
     def _h_escrow_hold(self, conn, env, payload):
         offer = self.store.get_offer(payload["offer_id"])
