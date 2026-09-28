@@ -4,5 +4,6 @@
   "tests/test_i18n.py::PatchTests::test_build_parser_gains_lang_flag": true,
   "tests/test_i18n.py::PatchTests::test_emit_wrapper_translates": true,
   "tests/test_zzdbg.py::T::test_3": true,
-  "tests/test_dashboard.py": true
+  "tests/test_dashboard.py::DashboardTests": true,
+  "tests/test_marketplace.py::test_marketplace_suite": true
 }
