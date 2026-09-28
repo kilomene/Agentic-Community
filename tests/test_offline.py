@@ -101,8 +101,11 @@ class MailboxUnitTests(unittest.TestCase):
         self.assertFalse(any(b"msg0" in t for t in texts))
 
     def test_overflow_bytes_eviction(self):
+        # NOTE: frames are ~502 bytes (200-byte text + fixed-length
+        # base62 sig); the cap must exceed one frame for the mailbox
+        # to retain the newest.
         mb = Mailbox(os.path.join(self.dir, "mb4.db"),
-                     max_bytes_per_recipient=500)
+                     max_bytes_per_recipient=600)
         s_priv, _ = generate_ed25519_keypair()
         from acp_crypto import ed25519_publickey
         s_pid = b62encode(ed25519_publickey(s_priv))
@@ -111,7 +114,7 @@ class MailboxUnitTests(unittest.TestCase):
             mb.store("r1", s_pid, "msg", f)
         pending = mb.pending("r1")
         total = sum(r["size"] for r in pending)
-        self.assertLessEqual(total, 500)
+        self.assertLessEqual(total, 600)
         # newest kept
         self.assertTrue(any(b"xxxx" in r["frame"] for r in pending))
 
