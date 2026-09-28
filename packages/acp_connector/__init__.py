@@ -40,6 +40,7 @@ from .projects import Projects
 from .presence import Presence
 from .revoke import Revoker
 from .bridge import Bridge
+from .scheduler import Scheduler
 
 __all__ = ["Connector", "Bridge", "PERMS", "AcpError"]
 
@@ -71,9 +72,13 @@ class Connector:
         self.revoker = Revoker(self)
         self.bridge = Bridge(owner=self)
         self.transport = TcpTransport()
+        # Scheduler: cron-like persisted tasks (actions are connector
+        # operations or app-registered callbacks — never shell).
+        self.scheduler = Scheduler(self)
 
         self._conns = {}  # pid -> Conn
         self._conns_lock = threading.Lock()
+        self._ext_handlers = {}  # V2+ kind -> fn(conn, env, payload)
         self._replay = collections.OrderedDict()
         self._replay_lock = threading.Lock()
         self._prev_x_priv = None  # pre-rotation X25519 key (decrypt fallback)
@@ -84,6 +89,9 @@ class Connector:
         self._sweeper = threading.Thread(target=self._sweep_loop,
                                          daemon=True, name="acp-sweeper")
         self._sweeper.start()
+        # Re-arm persisted scheduled tasks (custom actions must be
+        # re-registered by the app after construction).
+        self.scheduler.start()
         self.audit.log("connector.started", result="ok",
                        details={"handle": self.handle,
                                 "peer_id": self.peer_id})
@@ -109,6 +117,10 @@ class Connector:
     def stop(self):
         self._stopping = True
         self.audit.log("connector.stopped", result="ok", details={})
+        try:
+            self.scheduler.stop()
+        except Exception:
+            pass
         try:
             self.transport.stop()
         except Exception:
@@ -320,10 +332,13 @@ class Connector:
                 self.pairing.handle_challenge(conn, env)
             elif kind == ERROR:
                 self._on_error_envelope(env)
-            elif kind in (PRESENCE, KEY_ROTATE, REVOKE_NOTICE):
-                # Signed plaintext kinds (PROTOCOL.md section 7): the
-                # signature was verified above; validate the payload
-                # schema explicitly since verify_envelope does not.
+            elif kind in (PRESENCE, KEY_ROTATE, REVOKE_NOTICE) or (
+                    kind not in E2E_KINDS and kind in self._ext_handlers):
+                # Signed plaintext kinds (PROTOCOL.md section 7), plus
+                # V2+ extension plaintext kinds with a registered
+                # handler: the signature was verified above; validate
+                # the payload schema explicitly since verify_envelope
+                # does not.
                 validate_payload(kind, env.get("payload") or {})
                 self._dispatch_plain(conn, env, env["payload"])
             else:
@@ -362,7 +377,10 @@ class Connector:
         elif kind == FILE_ACK:
             self.files.handle_ack(env, payload)
         else:
-            raise AcpError("UNKNOWN_KIND", kind)
+            handler = self._ext_handlers.get(kind)
+            if handler is None:
+                raise AcpError("UNKNOWN_KIND", kind)
+            handler(conn, env, payload)
 
     def _dispatch_plain(self, conn, env, payload):
         kind = env["kind"]
@@ -373,7 +391,10 @@ class Connector:
         elif kind == REVOKE_NOTICE:
             self.revoker.handle_revoke_notice(env, payload)
         else:
-            raise AcpError("UNKNOWN_KIND", kind)
+            handler = self._ext_handlers.get(kind)
+            if handler is None:
+                raise AcpError("UNKNOWN_KIND", kind)
+            handler(conn, env, payload)
 
     def _on_error_envelope(self, env):
         payload = env.get("payload") or {}
@@ -393,6 +414,15 @@ class Connector:
             conn.send_env(envelope)
         except Exception:
             pass
+
+    def register_kind_handler(self, kind, fn):
+        """Register a V2+ extension handler for a protocol kind.
+
+        fn(conn, env, payload) is called for E2E kinds (payload already
+        decrypted) after signature/replay checks. Use with
+        acp_proto.register_kind().
+        """
+        self._ext_handlers[kind] = fn
 
     # ---------------------------------------------------------------- pairing
     def pair_initiate(self, host, port):
