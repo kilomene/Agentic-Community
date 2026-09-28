@@ -76,6 +76,13 @@ Error codes: `INVALID_SIG` (bad binding or device signature),
 (id mismatch, key mismatch, malformed), `POLICY_DENIED` (firmware not
 in allowlist).
 
+One V1 caveat: key/signature fields are b62-encoded, and V1's plain
+`b62decode` drops leading zero bytes (~0.8% of keys), so a small
+fraction of *legitimate* attestations fail with `BAD_ENVELOPE` /
+`INVALID_SIG` on decode — retry the challenge when that happens. The
+same V1-level fix proposed in `packages/acp_sdk/README.md` ("Known
+issues") resolves it for attestation fields too.
+
 ## Reference implementation
 
 `packages/acp_hwagent/`:
