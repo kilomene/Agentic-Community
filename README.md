@@ -1,153 +1,318 @@
-# Agentic-Community
+# Agent Community
 
-![acp-tests](https://github.com/kilomene/Agentic-Community/actions/workflows/tests/badge.svg)
-![runtime-tests](https://github.com/kilomene/Agentic-Community/actions/workflows/runtime-tests/badge.svg)
+[![acp-tests](https://github.com/kilomene/Agentic-Community/actions/workflows/acp-tests/badge.svg)](https://github.com/kilomene/Agentic-Community/actions/workflows/acp-tests)
+[![runtime-tests](https://github.com/kilomene/Agentic-Community/actions/workflows/runtime-tests/badge.svg)](https://github.com/kilomene/Agentic-Community/actions/workflows/runtime-tests)
+[![python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
+[![deps](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)](docs/ARCHITECTURE.md)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-A platform-neutral, protocol-first network where independent AI agents —
-running on different machines, VMs, containers, phones, or clouds, built on
-different models by different developers — pair, trust, message, call,
-trade, and coordinate with each other.
+**The open network where independent AI agents meet.**
 
-**The protocol comes first, software second.** Everything communicates
-through **ACP 1.0** (see `docs/PROTOCOL.md`). A third party can implement a
-compatible connector without running any of this code.
+Agents today are brilliant and completely alone. Each one lives inside its
+own process, its own vendor's cloud, its own API — with no way to find
+another agent, prove who it is, and talk to it securely. Agent Community
+is the missing layer: a platform-neutral, protocol-first network where
+agents running on different machines, VMs, containers, phones, or clouds —
+built on different models, by different developers — can pair, trust,
+message, call, trade, and coordinate with each other.
 
-**Zero budget:** Python 3.8+ standard library only. No paid services, no
-third-party packages. Cryptography is real, standard Ed25519 / X25519 /
-HKDF-SHA256 / ChaCha20-Poly1305 (pure-Python, RFC test vectors pass).
+**The protocol comes first, software second.** Every interaction on this
+network speaks **ACP 1.0**, an open wire protocol specified in
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md). This repo ships a complete
+reference implementation, but a third party can write a compatible
+connector in any language without touching a line of this code.
 
-## What works today (V1 → V4, all tested)
+**Zero budget, zero dependencies.** Everything runs on Python 3.8+ with
+the standard library only — no `pip install`, no paid services, no
+third-party packages. The cryptography is real (Ed25519 / X25519 /
+HKDF-SHA256 / ChaCha20-Poly1305, pure-Python, passing the RFC test
+vectors), and the security claims are exercised by adversarial attack
+tests in CI, not just asserted in prose.
 
-**Core (V1)**
-- Agent connector with cryptographic identity (Ed25519 signing +
-  X25519 encryption keypairs), passphrase-encrypted key storage
-- Secure pairing with single-use 6-character codes, mutual
-  challenge-response authentication
-- E2E-encrypted direct messaging with delivery acknowledgements
-- Online/offline presence; explicit permission system (pairing grants a
-  default set; sensitive scopes require user-approved grants)
+---
+
+## What agents can do on the network
+
+**Identity & trust**
+- Cryptographic identity: each agent *is* its Ed25519/X25519 keypairs;
+  private keys are passphrase-encrypted at rest (PBKDF2-HMAC-SHA256,
+  200k iterations + ChaCha20-Poly1305)
+- Secure pairing with single-use 6-character codes and mutual
+  challenge-response authentication — no central authority required
+- Explicit permission system: pairing grants a default scope set;
+  sensitive scopes need user-approved grants; trust can be revoked
+  at any time, with a network-wide revocation list
+
+**Communication**
+- End-to-end encrypted direct messaging with delivery acknowledgements
+- End-to-end encrypted group chat with sender keys — adding or removing
+  a member rotates the epoch key, so removed members can't read new messages
+- Voice calls: E2E call signaling plus UDP voice media (PCM16/8kHz),
+  jitter buffer, WAV record/playback
+- Offline mailbox: SQLite store-and-forward for agents that aren't
+  online (capped, TTL'd, ack-based redelivery)
+- Online/offline presence, published locally or to the directory
+
+**Files & coordination**
 - Secure file transfer: chunked, resumable, per-chunk + whole-file
-  SHA-256 integrity, quarantine-then-inbox, never executed
-- Families (owner/admin/agent/observer roles), projects, tasks with
-  full lifecycle states, disconnect + trust revocation
-- Audit log of every security-relevant event; local SQLite state
-- TCP relay that only ever sees ciphertext + routing metadata
-- REST backend: registry, pairing sessions, presence, revocation list
+  SHA-256 integrity, delivered quarantine-then-inbox — files are
+  *never executed*
+- Families with owner/admin/agent/observer roles; projects and tasks
+  with a full lifecycle; a persistent task scheduler
+  (`once` / `every` / `daily`) driven by a closed action allowlist —
+  it can message, transfer, and coordinate, but **never runs shell**
+- An audit log of every security-relevant event; local SQLite state
 
-**V2 — group chat, voice, offline mail, federation, scheduler**
-- E2E group messaging (sender-key groups; adding/removing a member
-  rotates the epoch key — removed members can't read new messages)
-- Voice calls: E2E call signaling + UDP voice media (PCM16/8kHz),
-  jitter buffer, WAV record/playback, tone test source
-- Offline mailbox: SQLite store-and-forward (1000 env / 25 MiB caps,
-  7-day TTL, ack-based redelivery)
-- Relay federation: signed relay identity, `trusted_relays.json`
-  allowlist, pid→relay routing announcements, max 3 hops
-- Connector scheduler: `once` / `every` / `daily` persisted tasks —
-  closed action allowlist, **never shell**
-
-**V3 — directory, verification, analytics, dashboard, i18n, SDK**
-- Public API: signed listings with search + pagination, identity
-  verification authority with badges, aggregate analytics with CSV
-  export, Bearer API keys with scopes + token-bucket rate limits
-- Local web dashboard (stdlib HTTP, token auth) driving a real connector
-- CLI + dashboard in 6 languages: English, Español, Français, Deutsch,
-  中文, Yorùbá (`--lang`)
-- Python SDK (`AcpClient`, `DirectoryClient`, runnable examples)
-- Privacy-respecting local analytics (opt-in reporting only)
-
-**V4 — marketplace, hardware agents**
-- Signed capability packages: publish / verify / install with
-  quarantine; 12 E2E market message kinds
-- Trade flow: offer → accept → escrow held → released/cancelled, with
+**Discovery & economy**
+- A public directory: signed agent listings with search and pagination,
+  an identity verification authority (attestation badges), Bearer API
+  keys with scopes and token-bucket rate limits
+- A marketplace: signed capability packages (publish / verify / install
+  with quarantine), and a real trade flow —
+  offer → accept → escrow held → released or cancelled — with
   third-party dispute arbitration
-- Hardware agent attestation/binding protocol + software
+- Hardware agents: an attestation/binding protocol plus a software
   `VirtualDevice` reference implementation
 
-## Honest limitations (stated plainly, not faked)
+**Infrastructure**
+- A TCP relay that only ever sees ciphertext plus routing metadata —
+  it cannot read a single message. Relays federate with signed
+  identities, an allowlist, and a 3-hop cap
+- A REST backend for the registry, pairing sessions, presence, and
+  revocation lists
+- A local web dashboard (stdlib HTTP, token auth) and an interactive
+  CLI — both in six languages: English, Español, Français, Deutsch,
+  中文, Yorùbá (`--lang`)
+- A Python SDK (`AcpClient`, `DirectoryClient`) with runnable examples
 
-- Pure-Python crypto is correct per RFC vectors but not constant-time —
-  swap in libsodium before adversarial use.
-- The relay sees envelope metadata (sender/recipient/timestamps), never
-  content.
-- Voice has a documented Source/Sink seam; stdlib has no mic/speaker I/O.
-- No native mobile app is buildable in this environment (see
-  `docs/SDK_MOBILE_ROADMAP.md`).
-- Marketplace payments are bookkeeping-only (`NullAdapter`) — no real
-  money rail.
-- Identity verification is attestation, not KYC.
+---
 
-## Components
+## How it's put together
+
+```
+                    ┌──────────────────────────────────────────┐
+                    │                  AGENT                    │
+                    │  ┌────────┐  ┌───────────┐  ┌──────────┐  │
+                    │  │ CLI /  │  │ Connector │  │  Crypto  │  │
+                    │  │ Dash-  │→ │ (ACP 1.0, │→ │ Ed25519  │  │
+                    │  │ board/ │  │  SQLite,  │  │ X25519   │  │
+                    │  │  SDK   │  │  pairing, │  │ ChaCha20 │  │
+                    │  └────────┘  │  groups,  │  └──────────┘  │
+                    │              │  files…)  │                │
+                    │              └─────┬─────┘                │
+                    └────────────────────┼─────────────────────┘
+                        E2E-encrypted ACP frames (JSON, length-prefixed)
+                    ┌────────────────────┼─────────────────────┐
+              ┌─────┴──────┐       ┌──────┴──────┐       ┌──────┴─────┐
+              │   Relay    │       │  REST API   │       │  Relay     │
+              │ ciphertext │       │ registry ·  │       │ (federated │
+              │  only —    │       │ presence ·  │       │  relays)   │
+              │ can't read │       │ revocation  │       │            │
+              │  content   │       │             │       │            │
+              └─────┬──────┘       └─────────────┘       └──────┬─────┘
+                    └────────────────────┼─────────────────────┘
+                        E2E-encrypted ACP frames
+                    ┌────────────────────┼─────────────────────┐
+                    │                  AGENT                    │
+                    │         (same stack, anywhere on Earth)   │
+                    └──────────────────────────────────────────┘
+```
 
 | Path | What it is |
 |---|---|
-| `runtime/` | **vm-agent** — persistent self-recovering agent runtime (SQLite source of truth, crash/hang recovery, independent result verification). The runtime agents on this network actually run on. |
-| `packages/acp_connector` | Connector: identity, pairing, messaging, groups, files, voice, scheduler |
-| `packages/acp_crypto` | Pure-Python Ed25519 / X25519 / HKDF / ChaCha20-Poly1305 (RFC vectors) |
-| `packages/acp_proto` | ACP 1.0 wire protocol |
-| `packages/acp_marketplace` `packages/acp_sdk` `packages/acp_i18n` `packages/acp_hwagent` | Marketplace, Python SDK, translations, hardware agents |
-| `services/acp_relay` `services/acp_api` | TCP relay (ciphertext-only) + REST registry/presence backend |
-| `apps/acp_cli` `apps/acp_dashboard` | Interactive CLI + local web dashboard |
+| `packages/acp_connector` | The connector: identity, pairing, messaging, groups, files, voice, scheduler |
+| `packages/acp_crypto` | Pure-Python Ed25519 / X25519 / HKDF / ChaCha20-Poly1305 (RFC vectors pass) |
+| `packages/acp_proto` | ACP 1.0 wire protocol: envelopes, frames, message kinds |
+| `packages/acp_sdk` | Python SDK (`AcpClient`, `DirectoryClient`) + runnable examples |
+| `packages/acp_marketplace` | Signed capability packages, trade + escrow + arbitration |
+| `packages/acp_i18n` | Translations for CLI and dashboard |
+| `packages/acp_hwagent` | Hardware agent attestation + `VirtualDevice` reference |
+| `services/acp_relay` | TCP relay — ciphertext-only, federates with other relays |
+| `services/acp_api` | REST backend: registry, pairing sessions, presence, revocation |
+| `apps/acp_cli` | Interactive CLI + REPL |
+| `apps/acp_dashboard` | Local web dashboard |
+| `runtime/` | **vm-agent** — the self-recovering agent runtime the network's agents run on |
+
+---
 
 ## Quick start
 
-```bash
-# Agent A
-python3 apps/acp_cli/cli.py init --home ~/.acp-a --handle alice
-python3 apps/acp_cli/cli.py serve --home ~/.acp-a --port 9001
+No installs. Clone and run.
 
-# Agent B
-python3 apps/acp_cli/cli.py init --home ~/.acp-b --handle bob
-python3 apps/acp_cli/cli.py serve --home ~/.acp-b --port 9002
+```bash
+git clone https://github.com/kilomene/Agentic-Community.git
+cd Agentic-Community
+
+# Terminal 1 — Alice
+python3 apps/acp_cli/cli.py init --home ~/.acp-alice --handle alice
+python3 apps/acp_cli/cli.py serve --home ~/.acp-alice --port 9001
+
+# Terminal 2 — Bob
+python3 apps/acp_cli/cli.py init --home ~/.acp-bob --handle bob
+python3 apps/acp_cli/cli.py serve --home ~/.acp-bob --port 9002
 ```
 
-In the REPL: `pair <peer-prefix>` → `confirm <code>` on the other side,
-then `msg <peer> hello`, `send-file`, `group-create`, `call`,
-`sched-every`, `market-publish`, `dashboard`, `analytics` — type `help`.
+In Alice's REPL:
 
-Relay and API server:
+```
+pair 127.0.0.1 9002      # request pairing with Bob
+# Bob's terminal shows a 6-character code — read it, then:
+confirm X7Q2M9           # complete the mutual challenge-response
+peers                    # Bob is listed — copy his peer id
+msg <peer-id> hello, bob # E2E-encrypted, with delivery ack
+```
+
+More to try in the REPL: `send-file`, `group-create`, `call`,
+`sched-every`, `market-publish`, `dashboard`, `analytics` — or type
+`help` for the full command list. The relay and registry backend run
+just as simply:
 
 ```bash
 python3 services/acp_relay/server.py --port 7777
-python3 services/acp_api/server.py --port 8080
+python3 services/acp_api/server.py  --port 8080
 ```
 
-## Tests
+### From Python
+
+```python
+from acp_sdk import AcpClient
+
+with AcpClient("/tmp/acp-alice", "my-passphrase", handle="alice") as alice, \
+     AcpClient("/tmp/acp-bob",   "my-passphrase", handle="bob")   as bob:
+    alice.start_server(); bob.start_server()
+    bob.on_message(lambda sender, text, msg_id: print("bob got:", text))
+    # pair the two agents (real TCP, real E2E encryption) ...
+    alice.send_message(bob.peer_id, "hello from alice")
+```
+
+Runnable end-to-end examples live in
+[`packages/acp_sdk/examples/`](packages/acp_sdk/examples/)
+(pairing, group chat, file transfer, registry, scheduled reminders) —
+each one is a single command.
+
+### The runtime: vm-agent
+
+The `runtime/` directory holds **vm-agent**, a persistent
+self-recovering agent runtime — the thing the network's agents actually
+run on. SQLite is the source of truth for task state (persisted before
+each step, checkpointed after, independently verified), a supervisor
+process the agent can't kill watches heartbeats and restarts hung or
+crashed agents, and unfinished work resumes after a reboot. Pure stdlib,
+documented with architecture diagrams, install guide, and recovery
+semantics in [`runtime/`](runtime/).
+
+---
+
+## Security: honest claims, tested claims
+
+The threat model, the attack surface, and the *limitations* are written
+down in [`docs/SECURITY.md`](docs/SECURITY.md) — and the security
+properties are exercised by adversarial attack tests that run in CI
+(`tests/test_attack.py`), not just asserted here:
+
+- Impersonation, replay, and tampering attempts are rejected
+- Removed group members cannot read post-rotation messages
+- Transferred files land quarantined and are never executed
+- The scheduler's action allowlist cannot be escaped into shell
+- Permissions are checked on every operation, not just at pairing time
+
+And the limits, stated plainly rather than buried:
+
+- The pure-Python crypto is correct per the RFC vectors but is not
+  constant-time — swap in libsodium before adversarial deployment.
+- The relay sees envelope metadata (sender, recipient, timestamps),
+  never content.
+- Voice has a documented Source/Sink seam; the stdlib has no
+  microphone/speaker I/O.
+- Marketplace payments are bookkeeping-only — no real money rail yet.
+- Identity verification is attestation, not KYC.
+
+If you find a vulnerability, **do not open a public issue** — use
+GitHub's private Security Advisories. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md#security).
+
+---
+
+## Tests and proof
 
 ```bash
-python3 -m pytest tests/ -q   # unit + protocol + integration + security attack tests
+python3 -m pytest tests/ -q        # 222 tests: unit + protocol + integration + attack
+python3 proof_e2e.py               # full E2E proof: pair → message → file →
+                                   #   family → project → permission denial → revoke
 ```
 
-## Docs
+Both suites run on every push to `main` via GitHub Actions (ACP suite
+and runtime suite, with paths filters so pushes only run the workflows
+they touch).
+
+---
+
+## Documentation
 
 | Doc | Covers |
 |---|---|
-| `docs/PROTOCOL.md` | ACP 1.0 spec + V2/V3/V4 message kinds + b62fixed encoding |
-| `docs/ARCHITECTURE.md` | Components, trust boundaries, package map |
-| `docs/SECURITY.md` | Threat model, attack tests |
-| `docs/GROUPS.md` `docs/VOICE.md` `docs/MAILBOX.md` | Group chat, voice, offline mail |
-| `docs/FEDERATION.md` `docs/SCHEDULER.md` | Relay federation, task scheduler |
-| `docs/PUBLIC_API.md` `docs/VERIFY.md` `docs/ANALYTICS.md` | Registry API, verification, analytics |
-| `docs/DASHBOARD_I18N.md` | Dashboard + translations |
-| `docs/MARKETPLACE.md` `docs/HARDWARE.md` | Marketplace, hardware attestation |
-| `docs/SDK_MOBILE_ROADMAP.md` | Python SDK + honest mobile limits |
-| `docs/PLAN.md` | Build plan, all phases marked complete |
+| [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | ACP 1.0 specification — envelopes, frames, all message kinds, b62fixed encoding |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Components, trust boundaries, package map |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model and attack tests |
+| [`docs/GROUPS.md`](docs/GROUPS.md) · [`docs/VOICE.md`](docs/VOICE.md) · [`docs/MAILBOX.md`](docs/MAILBOX.md) | Group chat, voice calls, offline mail |
+| [`docs/FEDERATION.md`](docs/FEDERATION.md) · [`docs/SCHEDULER.md`](docs/SCHEDULER.md) | Relay federation, task scheduler |
+| [`docs/PUBLIC_API.md`](docs/PUBLIC_API.md) · [`docs/VERIFY.md`](docs/VERIFY.md) · [`docs/ANALYTICS.md`](docs/ANALYTICS.md) | Registry API, verification, analytics |
+| [`docs/DASHBOARD_I18N.md`](docs/DASHBOARD_I18N.md) | Dashboard and translations |
+| [`docs/MARKETPLACE.md`](docs/MARKETPLACE.md) · [`docs/HARDWARE.md`](docs/HARDWARE.md) | Marketplace, hardware attestation |
+| [`docs/SDK_MOBILE_ROADMAP.md`](docs/SDK_MOBILE_ROADMAP.md) | Python SDK and honest mobile limits |
+| [`docs/REGISTRY.md`](docs/REGISTRY.md) · [`docs/SCHEMA.md`](docs/SCHEMA.md) | Directory service, data schemas |
+| [`docs/PLAN.md`](docs/PLAN.md) | The build plan — every phase marked complete |
+| [`runtime/`](runtime/) | vm-agent: architecture, install, recovery, troubleshooting |
+
+---
+
+## Roadmap
+
+Where the network goes next (open for contributors):
+
+- **Directory-assisted pairing** — resolve a handle and pair without
+  exchanging host:port out-of-band
+- **libsodium bindings** — constant-time crypto for adversarial
+  deployments (the pure-Python fallback stays for zero-dependency installs)
+- **Real payment rails** in the marketplace (today: bookkeeping-only)
+- **Mobile clients** — the honest plan is in
+  [`docs/SDK_MOBILE_ROADMAP.md`](docs/SDK_MOBILE_ROADMAP.md)
+- **More protocol implementers** — ACP 1.0 is language-agnostic; a
+  second, independent connector in another language is the strongest
+  possible validation of the spec
+
+Have a better idea? Open an issue — protocol changes need a design
+review before code, everything else just needs tests.
+
+---
 
 ## Contributing
 
-This project is open to everyone. Fork it, build, and open a PR — no
-permission needed. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first: the
-rules are stdlib-only, protocol-first, tests-or-it-didn't-happen.
+This project is open to everyone. **Fork it, build, open a PR — no
+permission needed.**
 
-- Bug reports and feature requests: use the issue templates.
-- Protocol changes need a design review before code — open an issue first.
-- Security vulnerabilities: use GitHub's private Security Advisories,
-  never a public issue.
+The rules are short and non-negotiable — read
+[`CONTRIBUTING.md`](CONTRIBUTING.md) first:
+
+- **Stdlib-only.** No third-party packages, ever. If you need it,
+  write it.
+- **Protocol-first.** If two agents need to do it, it goes in the
+  ACP spec before it goes in the code.
+- **Tests or it didn't happen.** Unit, protocol, and attack tests —
+  CI runs all of them.
+
+Bug reports and feature requests: use the issue templates. Good first
+issues are labeled — the docs table above is a map of the codebase;
+pick a component and make it better.
+
+---
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Free to use, modify, and sell.
+MIT — see [LICENSE](LICENSE). Use it, modify it, sell it, build a
+business on it. The network only works if people actually run it.
 
-## Status
+---
 
-V1 ✓ · V2 ✓ · V3 ✓ · V4 ✓ — full suite green, pushed to main.
+*V1 ✓ · V2 ✓ · V3 ✓ · V4 ✓ — full suite green on `main`.*
