@@ -174,7 +174,7 @@ sessions (session id binds the whole flow).
 | `PAIR_CHALLENGE` | either | `{challenge}` | no |
 | `PAIR_RESPONSE` | either | `{signature}` | no |
 | `PAIR_DONE` | either | `{identity}` | no |
-| `MSG` | either | `{scope, scope_id?, text, reply_to?}` | **yes** |
+| `MSG` | either | `{scope, scope_id?, text, reply_to?, auto?}` | **yes** |
 | `MSG_ACK` | either | `{message_id, status}` | no |
 | `PRESENCE` | either | `{status, timestamp}` | no |
 | `FILE_OFFER` | either | `{transfer_id, name, size, sha256, chunk_size, count}` | no (metadata) |
@@ -303,6 +303,43 @@ unknown kinds per §1 (forward compatibility).
   translations.
 - **V3 — Python SDK** (`packages/acp_sdk/`): `AcpClient` + directory
   client + runnable examples.
+- **V3 — instant messaging** (agent-to-agent IM):
+  - `MSG` payload gains two optional fields (wire-minimal: omitted when
+    unset; unknown fields are ignored per §1, so no proto bump):
+    `reply_to` (string) — the `message_id` this message answers;
+    `auto` (boolean `true`) — marks autopilot-generated messages so
+    autonomous agents can avoid reply loops. Both are informational:
+    a malformed `reply_to` is dropped (audited) but never kills the
+    message; `auto` is never trusted for authorization (any peer can
+    forge it).
+  - New `typing` kind: **signed plaintext** (same posture as
+    `PRESENCE`), ephemeral UI hinting, never persisted. Payload:
+    `{typing: bool, context: "direct"|"group", context_id?}` —
+    `context_id` is the `group_id` for group context. Senders
+    re-send `typing: true` every ≤ 5 s while typing; receivers expire
+    state 8 s after the last refresh. `typing: false` clears it.
+  - Group (`group_msg`) inner plaintext gains optional `reply_to`
+    (message-id string) and `refs` (list of task-id strings), included
+    only when set — the wire format for plain messages is
+    byte-identical to before, and old peers ignore the new keys.
+    Group message ids are deterministic and shared across members
+    (`"gm-" + b62(sha256("group_id:sender:seq")[:12])`), so `reply_to`
+    references resolve on every member's database.
+  - Channels = sender-key groups + a **local** project binding
+    (`group_channels` table: `group_id → project_id, topic`); the
+    binding is never announced on the wire. When a channel is linked,
+    `refs` are cross-checked against the linked project's tasks
+    (local convenience, not a trust boundary).
+  - Autopilot (opt-in autonomous replies, `services/acp_relay_daemon/`):
+    owner-edited `<home>/autopilot.json` opts peers/channels in per
+    policy (`mode: hook|echo`, `max_per_min`, `reply_to_auto`); hook
+    scripts in `<home>/autopilot_hooks/<name>.py` run as subprocesses
+    (event JSON on stdin → `{"reply": ...}` or bare text on stdout,
+    15 s timeout; environment holds no secrets; the reply always goes
+    to the event's source). Default posture is everything OFF. Loop
+    guard (never answer `auto` messages unless `reply_to_auto`) plus a
+    per-peer/channel token bucket stop reply ping-pong. Detail in the
+    daemon README ("Autopilot").
 - **V4 — marketplace** (`packages/acp_marketplace/`): signed capability
   packages (publish/verify/install with quarantine), 12 E2E market
   kinds (`market_list`, `market_listings`, `market_fetch`,
