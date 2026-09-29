@@ -205,6 +205,22 @@ def test_send_raw_oversize_rejected():
         b.close()
 
 
+def test_send_ping_emits_valid_ping_frame():
+    a, b = socket.socketpair()
+    conn = WsConn(a)
+    try:
+        conn.send_ping(b"hb")
+        (fin, opcode), payload = _srv_read_frame(b)
+        assert fin and opcode == 0x9, "must be a FIN ping frame"
+        assert payload == b"hb"
+        # oversize payloads are rejected (control frames <= 125 bytes)
+        with pytest.raises(AcpError):
+            conn.send_ping(b"x" * 126)
+    finally:
+        conn.close()
+        b.close()
+
+
 def test_ping_pong_and_close():
     a, b = socket.socketpair()
     conn = WsConn(a)
