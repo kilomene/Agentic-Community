@@ -205,3 +205,23 @@ def test_real_manifest_parses():
     for kind, src, _ in entries:
         if kind in ("dir", "file") and src != "-":
             assert os.path.exists(os.path.join(REPO, src)), src
+
+
+def test_resolve_repo_reads_recorded_repo_root(tmp_path, monkeypatch):
+    """Regression: resolve_repo must read <prefix>/config/repo-root even
+    when cfg.prefix is None (the normal --daemon loop case — install.sh
+    never passes --prefix). Before the fix it only consulted cfg.prefix
+    (the raw --prefix arg), so every cycle reported 'no-repo' and the
+    agent silently never self-updated."""
+    from updater import resolve_repo  # noqa: E402
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    fake_home = tmp_path / "home"
+    prefix = fake_home / ".acp"  # the real default layout
+    (prefix / "config").mkdir(parents=True)
+    (prefix / "config" / "repo-root").write_text(str(checkout))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("ACP_HOME", raising=False)
+    monkeypatch.delenv("ACP_REPO_ROOT", raising=False)
+    cfg = Cfg()  # prefix=None, exactly like the installed --daemon loop
+    assert resolve_repo(cfg) == str(checkout)
