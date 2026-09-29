@@ -45,6 +45,8 @@ import time
 LOG = logging.getLogger("acp-relay-daemon")
 
 PAIR_CODE_TTL = 3600          # codes live 1h; refreshed before expiry
+CODE_REFRESH_AHEAD = 600    # re-claim the same code when <10 min of life remain
+PING_INTERVAL = 30          # WebSocket keepalive: idle middleboxes kill quiet links
 PAIR_CODE_REFRESH_AT = 600    # re-claim when <10 min of life remains
 BACKOFFS = (5, 10, 20, 30, 60, 120, 300)  # reconnect backoff, seconds
 
@@ -422,10 +424,17 @@ class Daemon:
 
     def _serve_until_drop(self, link):
         """Block until the link drops (the Connector's reader thread owns
-        the socket); refresh the pairing code in the background."""
+        the socket); refresh the pairing code in the background and send
+        a WebSocket ping every cycle so idle middleboxes (Cloudflare
+        edge, NAT, proxies) don't silently kill a quiet connection."""
+        from acp_proto import AcpError  # local import: matches module style
         while not link.closed and not self._stop.is_set():
             self._refresh_code_if_needed()
-            self._stop.wait(30)
+            try:
+                link.send_ping()
+            except AcpError:
+                break  # send marks the link closed; reconnect takes over
+            self._stop.wait(PING_INTERVAL)
         if link.closed:
             LOG.warning("relay link dropped")
 
