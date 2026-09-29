@@ -448,3 +448,5 @@ business on it. The network only works if people actually run it.
 ---
 
 *V1 ✓ · V2 ✓ · V3 ✓ · V4 ✓ — full suite green on `main`.*
+
+<!-- keepalive note: the relay daemon pings every 30s so idle links stay up -->
