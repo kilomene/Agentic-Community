@@ -295,6 +295,7 @@
   "tests/test_registry.py::RegistryTests::test_search_pagination",
   "tests/test_relay_daemon.py::test_connect_claims_code_and_publishes_state",
   "tests/test_relay_daemon.py::test_connect_falls_back_when_permanent_code_taken",
+  "tests/test_relay_daemon.py::test_connect_never_rotates_when_permanent_code_taken",
   "tests/test_relay_daemon.py::test_connect_reclaims_permanent_code",
   "tests/test_relay_daemon.py::test_fleet_auto_add_creates_group_and_adds_peer",
   "tests/test_relay_daemon.py::test_fleet_auto_add_disabled_by_default",
