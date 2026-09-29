@@ -167,12 +167,13 @@ case "${1:-status}" in
   start)
     if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
       echo "relay daemon already running (pid $(cat "$PIDF"))"; exit 0; fi
+    shift
     nohup /usr/bin/python3 -m acp_relay_daemon.daemon \\
       --home "$_prefix/acp-home" \\
       --passphrase-file "$_prefix/config/acp-passphrase" \\
       --url "${ACP_RELAY_URL:-__RELAY__}" \\
       --state-dir "$_prefix/state" \\
-      --pid-file "$PIDF" >>"$LOGF" 2>&1 &
+      --pid-file "$PIDF" "$@" >>"$LOGF" 2>&1 &
     echo $! > "$PIDF"
     echo "relay daemon started (pid $!)"
     ;;
@@ -190,7 +191,7 @@ case "${1:-status}" in
     pkill -f "acp_relay_daemon.daemon" 2>/dev/null || true
     echo "relay daemon stopped"
     ;;
-  restart) "$0" stop; sleep 1; "$0" start;;
+  restart) "$0" stop; sleep 1; shift; "$0" start "$@";;
   status)
     if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
       echo "running (pid $(cat "$PIDF"))"
