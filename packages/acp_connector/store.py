@@ -14,6 +14,8 @@ import sqlite3
 import threading
 import time
 
+from acp_proto import AcpError
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS trusted_agents(
   agent_id     TEXT PRIMARY KEY,
@@ -99,7 +101,10 @@ CREATE TABLE IF NOT EXISTS messages(
   text         TEXT NOT NULL,
   timestamp    INTEGER NOT NULL,
   status       TEXT NOT NULL DEFAULT 'delivered',
-  created_at   INTEGER NOT NULL
+  created_at   INTEGER NOT NULL,
+  read_at      INTEGER NOT NULL DEFAULT 0,
+  reply_to     TEXT,
+  auto         INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
 CREATE TABLE IF NOT EXISTS presence(
@@ -148,7 +153,26 @@ class Store:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(_SCHEMA)
+            self._migrate_messages()
             self._db.commit()
+
+    # --------------------------------------------------------- schema migrs
+    def _migrate_messages(self):
+        """Add post-creation columns to an older messages table.
+
+        Idempotent: only columns missing from PRAGMA table_info get
+        ALTER TABLE. New databases get the columns from _SCHEMA directly.
+        """
+        cols = {r["name"] for r in
+                self._db.execute("PRAGMA table_info(messages)").fetchall()}
+        wanted = {
+            "read_at": "read_at INTEGER NOT NULL DEFAULT 0",
+            "reply_to": "reply_to TEXT",
+            "auto": "auto INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, ddl in wanted.items():
+            if name not in cols:
+                self._db.execute(f"ALTER TABLE messages ADD COLUMN {ddl}")
 
     def close(self):
         with self._lock:
@@ -431,14 +455,15 @@ class Store:
 
     # --------------------------------------------------------------- messages
     def add_message(self, message_id, sender_id, scope, scope_id, text,
-                    timestamp, status, created_at):
+                    timestamp, status, created_at, reply_to=None, auto=0,
+                    read_at=0):
         with self._lock:
             self._db.execute(
                 "INSERT OR REPLACE INTO messages(message_id, sender_id, scope,"
-                " scope_id, text, timestamp, status, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                " scope_id, text, timestamp, status, created_at, read_at,"
+                " reply_to, auto) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (message_id, sender_id, scope, scope_id, text, timestamp,
-                 status, created_at))
+                 status, created_at, read_at, reply_to, auto))
             self._db.commit()
 
     def get_message(self, message_id):
@@ -448,7 +473,7 @@ class Store:
                 (message_id,)).fetchone())
 
     def update_message(self, message_id, **fields):
-        allowed = {"status", "text"}
+        allowed = {"status", "text", "read_at"}
         sets = [f"{k}=?" for k in fields if k in allowed]
         if not sets:
             return
@@ -463,6 +488,91 @@ class Store:
             return [_row(r) for r in self._db.execute(
                 "SELECT * FROM messages ORDER BY created_at DESC LIMIT ?",
                 (limit,)).fetchall()]
+
+    # ----------------------------------------------------------------- inbox
+    def list_inbox(self, limit=50, unread_only=False, peer_pid=None):
+        """Newest-first stored messages (inbound and outbound).
+
+        unread_only=True keeps messages with read_at = 0. Outbound
+        messages are stored with read_at set at send time, so they
+        never appear as unread. peer_pid filters to inbound messages
+        from that peer (sender_id = peer_pid).
+        """
+        q = "SELECT * FROM messages"
+        conds, args = [], []
+        if unread_only:
+            conds.append("read_at = 0")
+        if peer_pid is not None:
+            conds.append("sender_id = ?")
+            args.append(peer_pid)
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        q += " ORDER BY created_at DESC, message_id DESC LIMIT ?"
+        args.append(limit)
+        with self._lock:
+            return [_row(r) for r in
+                    self._db.execute(q, args).fetchall()]
+
+    def mark_read(self, message_id):
+        """Set read_at to now. Raises AcpError(NOT_FOUND) for unknown id."""
+        with self._lock:
+            if self.get_message(message_id) is None:
+                raise AcpError("NOT_FOUND",
+                               f"unknown message {message_id}")
+            self._db.execute("UPDATE messages SET read_at=? WHERE message_id=?",
+                             (int(time.time()), message_id))
+            self._db.commit()
+
+    def mark_unread(self, message_id):
+        """Set read_at to 0. Raises AcpError(NOT_FOUND) for unknown id."""
+        with self._lock:
+            if self.get_message(message_id) is None:
+                raise AcpError("NOT_FOUND",
+                               f"unknown message {message_id}")
+            self._db.execute("UPDATE messages SET read_at=0 WHERE message_id=?",
+                             (message_id,))
+            self._db.commit()
+
+    def unread_count(self):
+        """Number of stored messages with read_at = 0."""
+        with self._lock:
+            return self._db.execute(
+                "SELECT COUNT(*) AS n FROM messages WHERE read_at = 0"
+            ).fetchone()["n"]
+
+    def get_thread(self, message_id):
+        """Full reply thread for a message, oldest-first.
+
+        Walks reply_to up to the root, then collects the root and every
+        message whose reply chain leads to it (recursive, cycle-safe).
+        Raises AcpError(NOT_FOUND) for unknown id.
+        """
+        with self._lock:
+            start = self.get_message(message_id)
+            if start is None:
+                raise AcpError("NOT_FOUND",
+                               f"unknown message {message_id}")
+            # Walk up to the root; visited guards a corrupt cycle.
+            seen, root = set(), start
+            while root["reply_to"]:
+                if root["message_id"] in seen:
+                    break
+                seen.add(root["message_id"])
+                parent = self.get_message(root["reply_to"])
+                if parent is None:
+                    break
+                root = parent
+            rows = self._db.execute(
+                "WITH RECURSIVE chain(message_id, depth) AS ("
+                " SELECT ?, 0"
+                " UNION "
+                " SELECT m.message_id, c.depth + 1 FROM messages m"
+                " JOIN chain c ON m.reply_to = c.message_id"
+                ") SELECT m.* FROM messages m"
+                " JOIN chain c ON m.message_id = c.message_id"
+                " ORDER BY c.depth ASC, m.created_at ASC, m.message_id ASC",
+                (root["message_id"],)).fetchall()
+            return [_row(r) for r in rows]
 
     # --------------------------------------------------------------- presence
     def set_presence(self, agent_id, status, updated_at):
