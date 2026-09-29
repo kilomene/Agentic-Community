@@ -15,11 +15,16 @@ Behavior:
     {"connected": bool, "url": ..., "since": ..., "peer_id": ...,
      "handle": ..., "code": ..., "code_expires_at": ...}
   * inbound envelopes are logged (kind/from); pairing requests are
-    logged loudly — the owner confirms them with the `acp` CLI.
+    auto-accepted — the pair_challenge is sent immediately, exactly like
+    the `acp` CLI — and logged loudly with the 6-char confirm code. The
+    owner reads the code to the other side; typing it there is the trust
+    step that completes pairing.
   * on SIGTERM/SIGINT the claimed code is released and the link closed.
 
-The daemon never sends messages on its own and never auto-accepts
-pairing: pairing is confirmed by the owner by protocol design.
+The daemon never sends chat messages on its own. Pairing challenges are
+auto-sent on request (same posture as the `acp` CLI's REPL): the 6-char
+confirm code, shown only on this side, remains the authentication step —
+auto-accepting the challenge cannot complete pairing without it.
 """
 
 import argparse
@@ -157,10 +162,22 @@ class Daemon:
         def _on_pair_req(session):
             # API is cb(session): session.peer_pid / peer_handle, and
             # session.code is the on-screen confirm code for the user.
+            # Auto-send the challenge immediately (same as the `acp`
+            # CLI): the human trust step is the 6-char confirm code,
+            # typed on the OTHER side out-of-band. Waiting for a manual
+            # accept here would deadlock headless pairing — the
+            # initiator would sit in await_challenge forever with no
+            # way to proceed, and the confirm code would be useless.
+            try:
+                session.accept()
+            except Exception as e:  # noqa: BLE001 - AcpError on bad state
+                LOG.error("could not auto-accept pairing request %s: %s",
+                          session.session_id, e)
+                return
             LOG.warning(
-                "PAIRING REQUEST from %s (%s) -- confirm code: %s "
-                "(session %s). The daemon never auto-accepts; read the "
-                "code to the user.",
+                "PAIRING REQUEST from %s (%s) -- challenge sent, confirm "
+                "code: %s (session %s). Read the code to the user NOW; "
+                "they type it on the other side to complete pairing.",
                 _short(session.peer_pid), session.peer_handle or "?",
                 session.code, session.session_id)
             self._record_pairing_request(session)
@@ -183,7 +200,10 @@ class Daemon:
 
     def _record_pairing_request(self, session):
         """Persist a pending inbound request (incl. confirm code) so the
-        owner can read it even if the daemon restarts."""
+        owner can read it even if the daemon restarts. Entries whose
+        sessions are done/failed/expired (e.g. superseded by a newer
+        request from the same peer) are pruned so a stale code is never
+        read out."""
         try:
             path = os.path.join(self.args.state_dir, "pairing-requests.json")
             try:
@@ -191,8 +211,16 @@ class Daemon:
                     pending = json.load(fh)
             except (OSError, ValueError):
                 pending = []
-            pending = [r for r in pending
-                       if r.get("session_id") != session.session_id]
+            live = []
+            for r in pending:
+                if r.get("session_id") == session.session_id:
+                    continue
+                s = (self.conn.pairing.get_session(r.get("session_id"))
+                     if self.conn is not None else None)
+                if s is None or s.state in ("done", "failed") or s.expired:
+                    continue
+                live.append(r)
+            pending = live
             pending.append({
                 "session_id": session.session_id,
                 "peer_pid": session.peer_pid,
