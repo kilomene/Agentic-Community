@@ -11,6 +11,7 @@ import queue
 import struct
 import sys
 import tempfile
+import types
 import threading
 import time
 
@@ -31,10 +32,11 @@ class FakeWs:
     """Stands in for WsConn: answers hello silently, claims/releases
     pairing codes, routes nothing else."""
 
-    def __init__(self):
+    def __init__(self, taken=None):
         self._q = queue.Queue()
         self._closed = False
         self.sent = []
+        self.taken = taken if taken is not None else set()  # refused codes
 
     @property
     def closed(self):
@@ -52,8 +54,13 @@ class FakeWs:
         if "pair_code_claim" in obj:
             body = obj["pair_code_claim"]
             code = body["code"]
-            self._q.put({"pair_code_claimed": {"code": code,
-                                               "req": body["req"]}})
+            if code in self.taken:
+                self._q.put({"pair_code_error": {"code": code,
+                                                "req": body["req"],
+                                                "error": "taken"}})
+            else:
+                self._q.put({"pair_code_claimed": {"code": code,
+                                                  "req": body["req"]}})
         elif "pair_code_release" in obj:
             body = obj["pair_code_release"]
             self._q.put({"pair_code_released": {"code": body["code"],
@@ -78,16 +85,18 @@ class FakeWs:
 @pytest.fixture()
 def fakes():
     made = []
+    taken = set()
 
     def _wss_connect(url):
-        ws = FakeWs()
+        ws = FakeWs(taken=taken)
         made.append(ws)
         return ws
 
     orig = relay_link_mod.wss_connect
     relay_link_mod.wss_connect = _wss_connect
     try:
-        yield made
+        fakes_ns = types.SimpleNamespace(conns=made, taken=taken)
+        yield fakes_ns
     finally:
         relay_link_mod.wss_connect = orig
 
@@ -152,11 +161,13 @@ def test_release_code_sends_release_frame(fakes, daemon_env):
     d._release_code()
     link.close()
     assert d.code is None
-    releases = [o for o in fakes[0].sent if "pair_code_release" in o]
+    releases = [o for o in fakes.conns[0].sent if "pair_code_release" in o]
     assert releases and releases[0]["pair_code_release"]["code"] == code
 
 
-def test_refresh_reclaims_near_expiry(fakes, daemon_env):
+def test_refresh_reclaims_same_code_near_expiry(fakes, daemon_env):
+    # the pairing code is permanent: refresh re-claims the SAME code,
+    # it never mints a fresh random one
     d, tmp = daemon_env
     link = d._connect_once()
     try:
@@ -166,12 +177,68 @@ def test_refresh_reclaims_near_expiry(fakes, daemon_env):
             d.code_expires_at = int(time.time()) + 60
         d._refresh_code_if_needed()
         pair = _read_json(tmp / "state" / "pair-code.json")
-        assert pair["code"] == d.code
+        assert pair["code"] == d.code == old
         assert d.code_expires_at > time.time() + 3000
-        # old code was released on the relay
-        releases = [o for o in fakes[0].sent if "pair_code_release" in o]
-        assert any(r["pair_code_release"]["code"] == old for r in releases)
+        # the claim frame asked for the same code back
+        claims = [o for o in fakes.conns[0].sent if "pair_code_claim" in o]
+        assert claims and claims[-1]["pair_code_claim"]["code"] == old
+        # nothing was released: the code never changed hands
+        releases = [o for o in fakes.conns[0].sent if "pair_code_release" in o]
+        assert not releases
     finally:
+        d._release_code()
+        link.close()
+
+
+def test_connect_reclaims_permanent_code(fakes, daemon_env):
+    # a code recorded in pair-code.json is re-claimed on (re)connect
+    d, tmp = daemon_env
+    with open(tmp / "state" / "pair-code.json", "w",
+              encoding="utf-8") as fh:
+        json.dump({"code": "ABC234", "claimed_at": 1, "expires_at": 2}, fh)
+    link = d._connect_once()
+    try:
+        assert d.code == "ABC234"
+        claims = [o for o in fakes.conns[0].sent if "pair_code_claim" in o]
+        assert claims and claims[0]["pair_code_claim"]["code"] == "ABC234"
+    finally:
+        d._release_code()
+        link.close()
+
+
+def test_connect_falls_back_when_permanent_code_taken(fakes, daemon_env):
+    # someone else grabbed our old code while we were down: claim a fresh
+    # one and carry on
+    fakes.taken.add("ABC234")
+    d, tmp = daemon_env
+    with open(tmp / "state" / "pair-code.json", "w",
+              encoding="utf-8") as fh:
+        json.dump({"code": "ABC234", "claimed_at": 1, "expires_at": 2}, fh)
+    link = d._connect_once()
+    try:
+        assert d.code and d.code != "ABC234" and len(d.code) == 6
+        pair = _read_json(tmp / "state" / "pair-code.json")
+        assert pair["code"] == d.code  # the new code is now the permanent one
+    finally:
+        d._release_code()
+        link.close()
+
+
+def test_status_reports_pairing_active(fakes, daemon_env):
+    import types
+    d, tmp = daemon_env
+    link = d._connect_once()
+    try:
+        assert d._status()["pairing_active"] == 0
+        sess = types.SimpleNamespace(state="await_confirm", expired=False)
+        d.conn.pairing._sessions["s1"] = sess
+        assert d._status()["pairing_active"] == 1
+        sess.state = "failed"
+        assert d._status()["pairing_active"] == 0
+        status = _read_json(tmp / "state" / "relay-status.json")
+        assert status["pairing_active"] == 0
+    finally:
+        d.conn.pairing._sessions.pop("s1", None)
         d._release_code()
         link.close()
 
@@ -180,9 +247,9 @@ def test_no_refresh_when_code_fresh(fakes, daemon_env):
     d, tmp = daemon_env
     link = d._connect_once()
     try:
-        before = fakes[0].sent[:]
+        before = fakes.conns[0].sent[:]
         d._refresh_code_if_needed()
-        claims = [o for o in fakes[0].sent[len(before):]
+        claims = [o for o in fakes.conns[0].sent[len(before):]
                   if "pair_code_claim" in o]
         assert not claims
     finally:
