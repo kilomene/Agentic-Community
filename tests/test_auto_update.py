@@ -113,6 +113,18 @@ def _restarts(world):
         return len(fh.read().strip().split())
 
 
+def _seed_healthy_daemon(world):
+    """Fake a running daemon (live pid file + fresh status), as the
+    updater would find it in production when no restart is needed."""
+    with open(os.path.join(world["prefix"], "run",
+                           "relay-daemon.pid"), "w") as fh:
+        fh.write(str(os.getpid()))
+    with open(os.path.join(world["prefix"], "state",
+                           "relay-status.json"), "w") as fh:
+        json.dump({"connected": True, "now": time.time(),
+                   "since": time.time(), "pairing_active": 0}, fh)
+
+
 def test_up_to_date_is_noop(world):
     cfg = _cfg(world)
     assert check_once(cfg) == "up-to-date"
@@ -225,3 +237,92 @@ def test_resolve_repo_reads_recorded_repo_root(tmp_path, monkeypatch):
     monkeypatch.delenv("ACP_REPO_ROOT", raising=False)
     cfg = Cfg()  # prefix=None, exactly like the installed --daemon loop
     assert resolve_repo(cfg) == str(checkout)
+
+
+def test_update_without_daemon_changes_skips_restart(world):
+    # a push that touches only non-lib files (docs, tests, READMEs) must
+    # NOT restart the daemon: the restart would drop the relay link and
+    # kill live pairings for no reason
+    _git(world["origin"], "checkout", "-q", "main")
+    with open(os.path.join(world["origin"], "README.md"), "w") as fh:
+        fh.write("# docs only\n")
+    _git(world["origin"], "add", ".")
+    _git(world["origin"], "commit", "-q", "-m", "docs only")
+
+    _seed_healthy_daemon(world)  # the daemon is already running out there
+    cfg = _cfg(world)
+    assert check_once(cfg) == "updated-no-restart"
+    assert _restarts(world) == 0
+    st = read_state(world["prefix"])
+    assert st["last_result"] == "updated-no-restart"
+    assert st["previous_sha"] != st["installed_sha"]
+
+
+def test_update_with_lib_changes_still_restarts(world):
+    # changing a lib file (covered by the manifest) still restarts
+    _git(world["origin"], "checkout", "-q", "main")
+    with open(os.path.join(world["origin"], "packages", "fakepkg",
+                            "mod.py"), "w") as fh:
+        fh.write("VERSION = 2\n")
+    _git(world["origin"], "add", ".")
+    _git(world["origin"], "commit", "-q", "-m", "lib change")
+
+    cfg = _cfg(world)
+    assert check_once(cfg) == "updated"
+    assert _restarts(world) == 1
+
+
+def _write_status(prefix, pairing_active):
+    import time as _t
+    p = os.path.join(prefix, "state", "relay-status.json")
+    with open(p, "w") as fh:
+        json.dump({"connected": True, "now": _t.time(),
+                   "pairing_active": pairing_active}, fh)
+
+
+def test_quiescence_passes_through_when_already_quiet(world):
+    from updater import wait_for_pairing_quiescence  # noqa: E402
+    _write_status(world["prefix"], 0)
+    cfg = _cfg(world)
+    assert wait_for_pairing_quiescence(cfg, world["prefix"],
+                                       timeout=5) is True
+
+
+def test_quiescence_waits_for_pairings_to_finish(world):
+    from updater import wait_for_pairing_quiescence  # noqa: E402
+    import threading
+    _write_status(world["prefix"], 2)
+    # the pairing finishes 1s in
+    t = threading.Timer(1.0, _write_status,
+                        args=(world["prefix"], 0))
+    t.start()
+    cfg = _cfg(world)
+    start = time.time()
+    try:
+        assert wait_for_pairing_quiescence(cfg, world["prefix"],
+                                           timeout=30) is True
+        assert time.time() - start >= 1.0
+    finally:
+        t.join()
+
+
+def test_quiescence_times_out_but_bounded(world):
+    from updater import wait_for_pairing_quiescence  # noqa: E402
+    _write_status(world["prefix"], 3)
+    cfg = _cfg(world)
+    start = time.time()
+    assert wait_for_pairing_quiescence(cfg, world["prefix"],
+                                       timeout=2) is False
+    assert time.time() - start < 10  # bounded: never waits forever
+
+
+def test_quiescence_unknown_status_proceeds(world):
+    # no status file at all (daemon down): nothing live to protect.
+    # Reports False (unknown) but does not block — the caller restarts
+    # either way.
+    from updater import wait_for_pairing_quiescence  # noqa: E402
+    cfg = _cfg(world)
+    start = time.time()
+    assert wait_for_pairing_quiescence(cfg, world["prefix"],
+                                       timeout=5) is False
+    assert time.time() - start < 5  # returns immediately, never blocks
