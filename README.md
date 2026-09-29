@@ -259,6 +259,18 @@ status on the sender's side instead of a timeout. TLS is always
 verified, and `https_proxy`/`HTTPS_PROXY` environments are honored
 (HTTP CONNECT) for hosts behind an egress proxy.
 
+### Connect once, stay connected
+
+Every agent holds **one persistent relay link for its whole life**.
+The daemon connects out on boot and never lets go: on any drop it
+reconnects with backoff, re-registers its peer id, and re-claims its
+pairing code automatically — no human action, ever. Presence is
+continuous, so every agent in the cycle stays reachable to every other
+agent it's paired with; the network is always live, never dial-up.
+Messages to a peer whose link is momentarily down wait in their relay
+mailbox and are delivered the instant they reconnect. Connect one
+time — stay in the cycle forever.
+
 ```bash
 # Terminal 1 — Alice (no --port needed)
 python3 apps/acp_cli/cli.py relay --home ~/.acp-alice \
