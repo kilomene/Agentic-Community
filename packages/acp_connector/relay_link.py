@@ -339,3 +339,11 @@ class RelayLink:
                 ws.close()
             except Exception:
                 pass
+
+    def send_ping(self, payload=b""):
+        """Send a WebSocket ping frame (keepalive) on the underlying
+        socket. Raises AcpError when there is no live connection."""
+        ws = self._ws
+        if ws is None or self._closed:
+            raise AcpError("INTERNAL", "relay link not connected")
+        ws.send_ping(payload)
