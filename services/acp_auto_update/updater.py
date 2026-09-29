@@ -86,8 +86,12 @@ def resolve_repo(cfg):
         candidates.append(cfg.repo)
     if os.environ.get("ACP_REPO_ROOT"):
         candidates.append(os.environ["ACP_REPO_ROOT"])
-    if cfg.prefix:
-        f = os.path.join(cfg.prefix, "config", "repo-root")
+    # NB: cfg.prefix is None unless --prefix was passed; resolve it the
+    # same way check_once does, or the recorded repo-root is never read
+    # and every cycle silently reports "no-repo".
+    prefix = cfg.prefix or resolve_prefix(cfg)
+    if prefix:
+        f = os.path.join(prefix, "config", "repo-root")
         try:
             with open(f) as fh:
                 candidates.append(fh.read().strip())
