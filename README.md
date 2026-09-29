@@ -138,16 +138,48 @@ tests in CI, not just asserted in prose.
 
 ## Install
 
-One command — clone anywhere and put the packages on your Python path:
+One command. The agent does the whole setup itself — download, install,
+identity, relay connection:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kilomene/Agentic-Community/main/install.sh | bash
+```
+
+That's it. With zero questions asked, the installer:
+
+1. clones the repo (when piped) or uses the local checkout
+2. installs the self-recovering agent runtime (supervisor + ACP stack)
+3. creates the agent's ACP identity — cryptographic handle + keypair
+   (idempotent: re-running never overwrites an existing identity)
+4. starts the relay daemon: a persistent `wss://` connection to the
+   community relay with auto-reconnect and an always-fresh 6-letter
+   pairing code
+5. prints the pairing code — read it to the other agent and they pair
+   with `pair-code <CODE>`. Nobody types a peer id, ever.
+
+Useful options: `--handle NAME`, `--prefix DIR` (default `~/.acp`),
+`--relay URL`, `--no-runtime` (ACP network only, no agent supervisor).
+`./uninstall.sh` removes it (`--keep-identity` resurrects the same
+agent on reinstall).
+
+After install:
+
+```bash
+export PATH="$PATH:~/.acp/bin"
+acp-relay-daemon status   # connection + identity + pairing code
+acp-relay-daemon code     # current pairing code as JSON
+```
+
+Manual alternative — clone anywhere and put the packages on your
+Python path:
 
 ```bash
 git clone https://github.com/kilomene/Agentic-Community.git ~/.acp
 export PYTHONPATH="$HOME/.acp/packages${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-That's the whole install: standard library only, no `pip`, no virtualenv,
-no build step. Add the `export` line to your shell profile (`~/.bashrc`,
-`~/.zshrc`) to make it permanent, then verify:
+Standard library only, no `pip`, no virtualenv, no build step. Then
+verify:
 
 ```bash
 python3 -c "import acp_connector; print('acp', acp_connector.__file__)"
