@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.join(REPO, "services", "acp_relay_daemon"))
 
 from acp_connector import Connector  # noqa: E402
 import acp_connector.relay_link as relay_link_mod  # noqa: E402
+import daemon as daemon_mod  # noqa: E402
+from acp_connector import AcpError  # noqa: E402
 from daemon import Daemon, PAIR_CODE_TTL  # noqa: E402
 
 
@@ -44,6 +46,9 @@ class FakeWs:
 
     def send_env(self, env):
         self.send_raw(struct.pack(">I", 0) + b"{}")
+
+    def send_ping(self, payload=b""):  # noqa: ARG002
+        self.sent.append({"ws_ping": True})
 
     def send_raw(self, frame_bytes):
         if self._closed:
@@ -427,3 +432,40 @@ def test_fleet_status_reports_group(daemon_env):
     assert st["auto_join"] is False
     assert st["group_id"] is None
     assert st["members"] is None
+
+
+def test_serve_sends_keepalive_pings(fakes, daemon_env, monkeypatch):
+    # the serve loop pings the relay every PING_INTERVAL so idle
+    # middleboxes don't kill a quiet connection
+    d, tmp = daemon_env
+    monkeypatch.setattr(daemon_mod, "PING_INTERVAL", 0.05)
+    link = d._connect_once()
+    d._stop.clear()
+    t = threading.Thread(target=d._serve_until_drop, args=(link,))
+    t.start()
+    time.sleep(0.3)
+    d._stop.set()
+    t.join(timeout=10)
+    assert not t.is_alive(), "serve loop hung"
+    pings = [o for o in fakes.conns[0].sent if o == {"ws_ping": True}]
+    assert len(pings) >= 2, "expected periodic keepalive pings, got %d" \
+        % len(pings)
+
+
+def test_serve_ping_failure_breaks_to_reconnect(fakes, daemon_env,
+                                                monkeypatch):
+    # a failed ping means the link is dead: the loop must exit so the
+    # reconnect path takes over instead of spinning on a dead socket
+    d, tmp = daemon_env
+    monkeypatch.setattr(daemon_mod, "PING_INTERVAL", 0.01)
+
+    class DeadWs(FakeWs):
+        def send_ping(self, payload=b""):
+            raise AcpError("INTERNAL", "connection closed")
+
+    link = d._connect_once()
+    link._ws = DeadWs()  # socket dies underneath the RelayLink
+    d._stop.clear()
+    start = time.time()
+    d._serve_until_drop(link)
+    assert time.time() - start < 5, "serve loop did not exit on ping failure"
