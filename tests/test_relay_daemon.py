@@ -205,7 +205,9 @@ def test_status_reflects_disconnect(fakes, daemon_env):
 
 def test_pairing_request_callback_matches_api_and_records(daemon_env):
     """Regression: PairingManager calls cb(session) with ONE arg. The
-    daemon's callback must accept exactly that and persist the confirm
+    daemon's callback must accept exactly that, auto-accept the request
+    (send the challenge immediately, like the `acp` CLI — otherwise the
+    initiator deadlocks in await_challenge), and persist the confirm
     code to state/pairing-requests.json (2026-09-29 live bug: the
     two-arg callback crashed, losing the confirm code)."""
     from types import SimpleNamespace
@@ -213,14 +215,52 @@ def test_pairing_request_callback_matches_api_and_records(daemon_env):
     d._register_callbacks()
     cbs = d.conn.pairing._request_cbs
     assert cbs, "daemon did not register a pairing-request callback"
+    accepted = []
     session = SimpleNamespace(
         session_id="sess-123", peer_pid="peer-abc",
-        peer_handle="olatunde", code="K7Q2XD")
+        peer_handle="olatunde", code="K7Q2XD",
+        accept=lambda: accepted.append(True))
     for cb in list(cbs):
         cb(session)  # must not raise TypeError
+    assert accepted == [True], "daemon did not auto-accept the request"
     recs = _read_json(tmp / "state" / "pairing-requests.json")
     assert len(recs) == 1
     rec = recs[0]
     assert rec["session_id"] == "sess-123"
     assert rec["peer_handle"] == "olatunde"
     assert rec["code"] == "K7Q2XD"
+
+
+def test_pairing_request_prunes_superseded_records(daemon_env):
+    """A stale record (session done/failed/expired, e.g. superseded by a
+    newer request from the same peer) is pruned from
+    pairing-requests.json when a new request is recorded, so a dead
+    code is never read out."""
+    from types import SimpleNamespace
+    from acp_connector.pairing import PairingSession
+    d, tmp = daemon_env
+    d._register_callbacks()
+    cbs = d.conn.pairing._request_cbs
+    cb = cbs[0]
+    mgr = d.conn.pairing
+    # Emulate a superseded session: failed, but its record is still out.
+    dead = PairingSession(mgr, "sess-old", "responder")
+    dead.peer_pid = "peer-abc"
+    dead.state = "failed"
+    with mgr._lock:
+        mgr._sessions["sess-old"] = dead
+    stale = SimpleNamespace(
+        session_id="sess-old", peer_pid="peer-abc",
+        peer_handle="olatunde", code="OLD111",
+        accept=lambda: None)
+    cb(stale)
+    # Now a fresh request arrives; the stale record must be pruned.
+    fresh = SimpleNamespace(
+        session_id="sess-new", peer_pid="peer-abc",
+        peer_handle="olatunde", code="NEW222",
+        accept=lambda: None)
+    cb(fresh)
+    recs = _read_json(tmp / "state" / "pairing-requests.json")
+    codes = [r["code"] for r in recs]
+    assert "OLD111" not in codes, "stale superseded code still recorded"
+    assert "NEW222" in codes
