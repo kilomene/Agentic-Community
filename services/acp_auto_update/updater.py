@@ -4,8 +4,11 @@
 Once an agent is installed, nobody should ever update it by hand again.
 This process watches the Agentic-Community repo and, when bug fixes or
 new features land on main, pulls them, re-syncs the installed code,
-restarts the relay daemon, and verifies it came back healthy — rolling
-back automatically if it didn't.
+restarts the relay daemon only when the daemon's own code changed
+(never for docs/tests/worker-only pushes — a restart would drop the
+relay link and kill live pairings), waits for any in-flight pairing
+handshake to finish before restarting, and verifies the daemon came
+back healthy — rolling back automatically if it didn't.
 
     python3 -m acp_auto_update.updater --once     # single check/update cycle
     python3 -m acp_auto_update.updater --daemon   # loop forever (the service)
@@ -203,6 +206,82 @@ def restart_daemon(cfg, prefix):
     return rc == 0
 
 
+QUIESCE_TIMEOUT = 120  # max seconds to wait for pairings to finish
+QUIESCE_POLL = 5       # seconds between quiescence checks
+
+
+def _daemon_lib_paths(repo):
+    """Repo-relative paths that land in $PREFIX/lib (from the manifest).
+
+    The running daemon imports only from $PREFIX/lib, so a push that
+    touches none of these paths cannot change daemon behavior — and must
+    not trigger a restart (a restart would drop the relay link, release
+    the pairing code, and kill any live pairing handshake).
+    """
+    paths = [MANIFEST_REL]
+    try:
+        for _kind, src, _dst in parse_manifest(repo):
+            if src != "-":
+                paths.append(src)
+    except (OSError, ValueError):
+        pass
+    return paths
+
+
+def _daemon_paths_changed(cfg, repo, old_sha, new_sha):
+    """True when old_sha..new_sha touches any daemon lib path."""
+    paths = _daemon_lib_paths(repo)
+    rc, out = _git(cfg, repo, "diff", "--name-only", old_sha, new_sha,
+                   "--", *paths)
+    if rc != 0:
+        # can't tell — err on the side of restarting
+        return True
+    return bool(out.strip())
+
+
+def _pairing_active(cfg, prefix):
+    """Active (mid-handshake) pairing sessions per the daemon's status
+    file, or None when the status is missing/stale (daemon down or old
+    code that doesn't report it — treat as unknown, not as busy)."""
+    try:
+        with open(os.path.join(prefix, "state", "relay-status.json")) as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if abs(time.time() - st.get("now", 0)) > 180:
+        return None
+    v = st.get("pairing_active")
+    return int(v) if isinstance(v, (int, float)) else None
+
+
+def wait_for_pairing_quiescence(cfg, prefix, timeout=QUIESCE_TIMEOUT):
+    """Block until no pairing handshake is in flight (or timeout).
+
+    A daemon restart drops the relay link and kills live pairings, so the
+    updater holds off while the owner is mid-pairing. Always bounded:
+    after `timeout` seconds it gives up waiting and the restart proceeds.
+    Returns True when quiescent, False on timeout/unknown.
+    """
+    deadline = time.time() + timeout
+    waited = False
+    while time.time() < deadline:
+        n = _pairing_active(cfg, prefix)
+        if n is None:
+            return waited  # daemon down or status unknown: nothing to protect
+        if n <= 0:
+            if waited:
+                cfg.log("pairing quiescent; proceeding with restart")
+            return True
+        if not waited:
+            cfg.log("waiting for %d active pairing(s) to finish before "
+                    "restarting daemon (max %ds)" % (n, timeout))
+            waited = True
+        time.sleep(QUIESCE_POLL)
+    cfg.log("WARNING: %d pairing(s) still active after %ds; restarting "
+            "anyway" % (_pairing_active(cfg, prefix) or -1, timeout))
+    return False
+
+
 # ------------------------------------------------------------ state
 
 def _state_path(prefix):
@@ -317,13 +396,23 @@ def check_once(cfg):
                     repo=repo, installed_sha=remote_sha, error=str(e)[:200])
         return "sync-failed"
 
-    restart_daemon(cfg, prefix)
+    restart_needed = _daemon_paths_changed(cfg, repo, local_sha, remote_sha)
+    if not restart_needed:
+        cfg.log("no daemon-relevant changes in %s..%s; lib synced, daemon "
+                "left running (pairing code and live sessions untouched)"
+                % (local_sha[:12], remote_sha[:12]))
+    else:
+        # Never restart mid-pairing: wait for handshakes to settle first.
+        wait_for_pairing_quiescence(cfg, prefix)
+        restart_daemon(cfg, prefix)
     if daemon_healthy(cfg, prefix, timeout=cfg.health_timeout):
         cfg.log("OK: updated to %s, daemon healthy" % remote_sha[:12])
-        write_state(prefix, last_check=now, last_result="updated",
+        write_state(prefix, last_check=now,
+                    last_result="updated" if restart_needed
+                    else "updated-no-restart",
                     repo=repo, installed_sha=remote_sha,
                     previous_sha=local_sha)
-        return "updated"
+        return "updated" if restart_needed else "updated-no-restart"
 
     # --- roll back ----------------------------------------------------
     cfg.log("FAIL: daemon unhealthy after update; ROLLING BACK to %s"
