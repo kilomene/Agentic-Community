@@ -34,6 +34,7 @@ rotation still decrypt; they are never re-distributed.
 Admin control: only the current admin may add/remove members or
 transfer admin. Violations are rejected with an audit entry.
 """
+import hashlib
 import json
 import threading
 import time
@@ -90,6 +91,14 @@ CREATE TABLE IF NOT EXISTS group_history(
   sender_id  TEXT NOT NULL,
   text       TEXT NOT NULL,
   ts         INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  reply_to   TEXT,
+  refs       TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS group_channels(
+  group_id   TEXT PRIMARY KEY,
+  project_id TEXT,            -- NULL = plain group, not a channel
+  topic      TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_group_history_group
@@ -113,6 +122,19 @@ def _new_group_id():
     return "g-" + b62encode(random_bytes(16))
 
 
+def _group_msg_id(group_id, sender_id, seq):
+    """Deterministic, shared message id for (group, sender, seq).
+
+    The sender and every receiver compute the *same* id independently,
+    so ``reply_to`` references resolve on every member's database even
+    though each side stores the message on its own. The id never goes
+    on the wire (local DB key only), so old peers are unaffected.
+    """
+    digest = hashlib.sha256(
+        ("%s:%s:%d" % (group_id, sender_id, seq)).encode("utf-8")).digest()
+    return "gm-" + b62encode(digest[:12])
+
+
 class GroupChat:
     """Sender-key E2E group messaging bound to a Connector."""
 
@@ -123,6 +145,17 @@ class GroupChat:
         store = connector.store
         with store._lock:
             store._db.executescript(_SCHEMA)
+            # Idempotent migration for databases created before the
+            # channel workstream: add reply_to / refs to group_history.
+            cols = {r["name"] for r in store._db.execute(
+                "PRAGMA table_info(group_history)").fetchall()}
+            if "reply_to" not in cols:
+                store._db.execute(
+                    "ALTER TABLE group_history ADD COLUMN reply_to TEXT")
+            if "refs" not in cols:
+                store._db.execute(
+                    "ALTER TABLE group_history ADD COLUMN refs"
+                    " TEXT NOT NULL DEFAULT '[]'")
             store._db.commit()
         c = connector
         c.register_kind_handler(GROUP_CREATE, self._on_group_create)
@@ -288,22 +321,63 @@ class GroupChat:
         Best-effort delivery: every reachable member is sent to; failures
         are audit-logged. Returns the message id.
         """
+        return self.send_channel_message(group_id, text)
+
+    def send_channel_message(self, group_id, text, reply_to=None,
+                             refs=None):
+        """Send a group message, optionally as a reply and/or referencing
+        project tasks.
+
+        reply_to: optional message-id string. Only the type is validated:
+            members' histories may legitimately diverge (e.g. a member
+            that joined later has no older keys), so a dangling reply_to
+            is stored, not rejected.
+        refs: optional list of task-id strings. When this channel is
+            linked to a project, every ref must be a task of that project
+            (NOT_FOUND otherwise, and nothing is sent). When unlinked,
+            refs are type-validated and stored but cannot be cross-checked.
+        The inner plaintext carries reply_to / refs only when set, so the
+        wire format is byte-identical for plain messages; old peers read
+        the known keys and ignore the rest.
+        Returns the (deterministic, cross-member) message id.
+        """
         c = self._c
         if not isinstance(text, str) or not text:
             raise AcpError("INTERNAL", "text must be a non-empty string")
+        if reply_to is not None and not isinstance(reply_to, str):
+            raise AcpError("INTERNAL", "reply_to must be a message-id string")
+        if refs is None:
+            refs = []
+        if not isinstance(refs, list) or not all(
+                isinstance(r, str) for r in refs):
+            raise AcpError("INTERNAL",
+                           "refs must be a list of task-id strings")
         with self._lock:
             g = self._get_group(group_id)
             if g is None:
                 raise AcpError("INTERNAL", "unknown group")
             if not self._is_member(group_id, c.peer_id):
                 raise AcpError("POLICY_DENIED", "not a group member")
+            project_id = self._channel_project_id(group_id)
+            if project_id is not None:
+                for task_id in refs:
+                    task = c.store.get_task(task_id)
+                    if task is None or task.get("project_id") != project_id:
+                        raise AcpError("NOT_FOUND",
+                                       "task %s is not in linked project %s"
+                                       % (task_id, project_id))
             epoch = int(g["epoch"])
             key = self._get_epoch_key(group_id, epoch)
             if key is None:
                 raise AcpError("INTERNAL", "no epoch key for current epoch")
             seq = self._next_seq(group_id, c.peer_id)
             nonce = random_bytes(12)
-            pt = canonical({"text": text, "sender": c.peer_id, "seq": seq})
+            inner = {"text": text, "sender": c.peer_id, "seq": seq}
+            if reply_to is not None:
+                inner["reply_to"] = reply_to
+            if refs:
+                inner["refs"] = refs
+            pt = canonical(inner)
             aad = canonical({"group_id": group_id, "epoch": epoch,
                              "seq": seq})
             ct = aead_encrypt(key, nonce, pt, aad)
@@ -311,15 +385,16 @@ class GroupChat:
                 "group_id": group_id, "epoch": epoch, "seq": seq,
                 "nonce": b62encode_fixed(nonce), "ct": b62encode_fixed(ct),
             }
-            msg_id = "gm-" + b62encode(random_bytes(12))
+            msg_id = _group_msg_id(group_id, c.peer_id, seq)
             now = int(time.time())
             with c.store._lock:
                 self._db().execute(
                     "INSERT OR REPLACE INTO group_history(message_id,"
-                    " group_id, epoch, seq, sender_id, text, ts, created_at)"
-                    " VALUES (?,?,?,?,?,?,?,?)",
+                    " group_id, epoch, seq, sender_id, text, ts, created_at,"
+                    " reply_to, refs)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (msg_id, group_id, epoch, seq, c.peer_id, text, now,
-                     now))
+                     now, reply_to, json.dumps(refs)))
                 self._db().commit()
             self._replay_seen(group_id, c.peer_id, seq)  # own send counts
             members = [m for m in self._members(group_id)
@@ -491,6 +566,91 @@ class GroupChat:
         c.audit.log("group.left", target=group_id, result="ok",
                     details={"admin_passed_to": new_admin})
 
+    # ------------------------------------------------------------ API: channels
+    def _channel_row(self, group_id):
+        r = self._db().execute(
+            "SELECT * FROM group_channels WHERE group_id=?",
+            (group_id,)).fetchone()
+        return dict(r) if r else None
+
+    def _channel_project_id(self, group_id):
+        chan = self._channel_row(group_id)
+        return chan["project_id"] if chan else None
+
+    def open_channel(self, name, member_pids, project_id=None, topic=""):
+        """Create a group and record it as a channel, optionally bound to
+        a project. Returns group_id.
+
+        project_id is validated with store.get_project when given
+        (NOT_FOUND otherwise). The binding is local to this member's
+        database; it is not announced on the wire.
+        """
+        c = self._c
+        if project_id is not None:
+            if c.store.get_project(project_id) is None:
+                raise AcpError("NOT_FOUND",
+                               "unknown project %s" % project_id)
+        if not isinstance(topic, str):
+            raise AcpError("INTERNAL", "topic must be a string")
+        group_id = self.create_group(name, member_pids)
+        now = int(time.time())
+        with c.store._lock:
+            self._db().execute(
+                "INSERT INTO group_channels(group_id, project_id, topic,"
+                " created_at) VALUES (?,?,?,?)",
+                (group_id, project_id, topic, now))
+            self._db().commit()
+        c.audit.log("group.channel_opened", target=group_id, result="ok",
+                    details={"project": project_id, "topic": topic})
+        return group_id
+
+    def link_project(self, group_id, project_id):
+        """Admin-only: attach a project to an existing group, turning it
+        into a channel (or re-binding an existing channel)."""
+        c = self._c
+        self._require_admin(group_id)
+        if c.store.get_project(project_id) is None:
+            raise AcpError("NOT_FOUND", "unknown project %s" % project_id)
+        now = int(time.time())
+        with c.store._lock:
+            if self._channel_row(group_id) is None:
+                self._db().execute(
+                    "INSERT INTO group_channels(group_id, project_id,"
+                    " topic, created_at) VALUES (?,?,?,?)",
+                    (group_id, project_id, "", now))
+            else:
+                self._db().execute(
+                    "UPDATE group_channels SET project_id=?"
+                    " WHERE group_id=?", (project_id, group_id))
+            self._db().commit()
+        c.audit.log("group.channel_linked", target=group_id, result="ok",
+                    details={"project": project_id})
+
+    def unlink_project(self, group_id):
+        """Admin-only: detach the project from a channel. History (with
+        its refs) is kept; new messages no longer cross-check task refs.
+        """
+        c = self._c
+        self._require_admin(group_id)
+        with c.store._lock:
+            self._db().execute(
+                "UPDATE group_channels SET project_id=NULL"
+                " WHERE group_id=?", (group_id,))
+            self._db().commit()
+        c.audit.log("group.channel_unlinked", target=group_id, result="ok",
+                    details={})
+
+    def get_channel(self, group_id):
+        """get_group(...) plus project_id and topic. Plain groups report
+        project_id None and topic ''. Unknown group -> None."""
+        g = self.get_group(group_id)
+        if g is None:
+            return None
+        chan = self._channel_row(group_id)
+        g["project_id"] = chan["project_id"] if chan else None
+        g["topic"] = chan["topic"] if chan else ""
+        return g
+
     # ------------------------------------------------------------ API: read
     def list_groups(self):
         return [dict(r) for r in self._db().execute(
@@ -509,6 +669,47 @@ class GroupChat:
             "SELECT message_id, epoch, seq, sender_id, text, ts"
             " FROM group_history WHERE group_id=?"
             " ORDER BY created_at LIMIT ?", (group_id, limit)).fetchall()]
+
+    @staticmethod
+    def _parse_refs(raw):
+        try:
+            vals = json.loads(raw) if raw else []
+        except Exception:
+            return []
+        return vals if isinstance(vals, list) else []
+
+    def _channel_rows(self, group_id):
+        rows = [dict(r) for r in self._db().execute(
+            "SELECT message_id, epoch, seq, sender_id, text, ts,"
+            " reply_to, refs FROM group_history WHERE group_id=?"
+            " ORDER BY created_at, rowid", (group_id,)).fetchall()]
+        for r in rows:
+            r["refs"] = self._parse_refs(r.get("refs"))
+        return rows
+
+    def get_channel_history(self, group_id, limit=100):
+        """History rows including reply_to (message-id or None) and refs
+        (list of task ids). Oldest first."""
+        return self._channel_rows(group_id)[:limit]
+
+    def get_channel_thread(self, group_id, root_msg_id):
+        """Oldest-first thread: the root message plus every message that
+        transitively replies to it via reply_to chains. Unknown root or
+        unknown group -> []."""
+        rows = self._channel_rows(group_id)
+        by_id = {r["message_id"]: r for r in rows}
+        if root_msg_id not in by_id:
+            return []
+        in_thread = {root_msg_id}
+        frontier = [root_msg_id]
+        while frontier:
+            cur = frontier.pop()
+            for r in rows:
+                if r["reply_to"] == cur and \
+                        r["message_id"] not in in_thread:
+                    in_thread.add(r["message_id"])
+                    frontier.append(r["message_id"])
+        return [r for r in rows if r["message_id"] in in_thread]
 
     # ------------------------------------------------------------ inbound
     def _on_group_create(self, conn, env, payload):
@@ -641,20 +842,39 @@ class GroupChat:
                 c.audit.log("group.msg_bad_text", actor=sender,
                             target=group_id, result="denied", details={})
                 return
+            # Channel extensions: optional fields. Old peers simply never
+            # send them; malformed values are dropped + audited rather
+            # than crashing the receiver.
+            reply_to = inner.get("reply_to")
+            if reply_to is not None and not isinstance(reply_to, str):
+                c.audit.log("group.msg_bad_fields", actor=sender,
+                            target=group_id, result="denied",
+                            details={"reason": "reply_to not a string"})
+                return
+            refs = inner.get("refs")
+            if refs is None:
+                refs = []
+            if not isinstance(refs, list) or not all(
+                    isinstance(r, str) for r in refs):
+                c.audit.log("group.msg_bad_fields", actor=sender,
+                            target=group_id, result="denied",
+                            details={"reason": "refs not a list of strings"})
+                return
             if self._replay_seen(group_id, sender, seq):
                 c.audit.log("group.msg_replay_dropped", actor=sender,
                             target=group_id, result="denied",
                             details={"seq": seq})
                 return
-            msg_id = "gm-" + b62encode(random_bytes(12))
+            msg_id = _group_msg_id(group_id, sender, seq)
             now = int(time.time())
             with c.store._lock:
                 self._db().execute(
                     "INSERT OR REPLACE INTO group_history(message_id,"
-                    " group_id, epoch, seq, sender_id, text, ts, created_at)"
-                    " VALUES (?,?,?,?,?,?,?,?)",
+                    " group_id, epoch, seq, sender_id, text, ts, created_at,"
+                    " reply_to, refs)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (msg_id, group_id, epoch, seq, sender, text,
-                     int(env["ts"]), now))
+                     int(env["ts"]), now, reply_to, json.dumps(refs)))
                 self._db().commit()
         c.audit.log("group.msg_received", actor=sender, target=group_id,
                     result="ok", details={"seq": seq, "epoch": epoch})
