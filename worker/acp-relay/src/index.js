@@ -8,7 +8,7 @@
 
 import { AcpRelay } from "./relay-do.js";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";  // pair-code rendezvous directory
 
 export default {
   async fetch(req, env) {
