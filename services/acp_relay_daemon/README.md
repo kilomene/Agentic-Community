@@ -19,6 +19,10 @@ Pairing requests are **auto-accepted**: the daemon sends the
 the other side out-of-band. Waiting for a manual accept would deadlock
 headless pairing.
 
+The daemon also sends a WebSocket ping every 30s as a keepalive —
+without it, idle middleboxes (Cloudflare edge, NAT, proxies) silently
+kill a quiet connection every few minutes, forcing a reconnect.
+
 ## Run
 
 Normally installed and started by the repo-root `install.sh`:
