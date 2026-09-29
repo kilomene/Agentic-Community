@@ -24,7 +24,6 @@ Interface mirrors transport.Conn so Connector can treat the link as a
 connection: send_env, send_raw, read_loop (never raises), close,
 .closed, .peer_addr.
 """
-import json
 import os
 import re
 import struct
