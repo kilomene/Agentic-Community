@@ -155,8 +155,9 @@ class Daemon:
         def _short(pid):
             return pid[:16] + "..." if len(pid) > 16 else pid
 
-        def _on_msg(peer_pid, text):
-            LOG.info("inbound message from %s: %.120s", _short(peer_pid),
+        def _on_msg(peer_pid, text, msg_id):
+            LOG.info("inbound message from %s (id %s): %.120s",
+                     _short(peer_pid), msg_id[:12],
                      text.replace("\n", " "))
 
         def _on_pair_req(session):
