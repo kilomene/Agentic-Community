@@ -164,12 +164,29 @@ class PairingManager:
         self._lock = threading.Lock()
         self._sessions = {}  # session_id -> PairingSession (in-memory)
         self._request_cbs = []
+        self._complete_cbs = []
 
     # ------------------------------------------------------------------ API
     def on_pairing_request(self, cb):
         """cb(session): fired when a pair_request arrives. Read
         session.code and show it to the user; call session.accept()."""
         self._request_cbs.append(cb)
+
+    def on_pairing_complete(self, cb):
+        """cb(peer_pid, peer_handle, role): fired when a pairing session
+        reaches 'done' (role is 'initiator' or 'responder'). A raising
+        callback never breaks the handshake — the error is audited."""
+        self._complete_cbs.append(cb)
+
+    def _fire_complete(self, peer_pid, peer_handle, role):
+        c = self._c
+        for cb in list(self._complete_cbs):
+            try:
+                cb(peer_pid, peer_handle, role)
+            except Exception as e:  # noqa: BLE001 - never break pairing
+                c.audit.log("pairing.callback_error", actor=peer_pid,
+                            result="failed",
+                            details={"error": str(e), "when": "complete"})
 
     def pair_initiate(self, host, port):
         """Connect and send pair_request. Returns the initiator session."""
@@ -349,6 +366,7 @@ class PairingManager:
                     details={"session": session.session_id,
                              "role": "responder"})
         c._metric("pairing_completed")
+        self._fire_complete(peer_pid, session.peer_handle, "responder")
 
     def handle_welcome(self, conn, env, payload):
         """Initiator: pair_welcome (E2E) arrived."""
@@ -367,6 +385,7 @@ class PairingManager:
                     details={"session": session.session_id,
                              "role": "initiator"})
         c._metric("pairing_completed")
+        self._fire_complete(peer_pid, session.peer_handle, "initiator")
 
     # -------------------------------------------------------------- internal
     def _new_session(self, role, **kw):
