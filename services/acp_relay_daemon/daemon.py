@@ -93,6 +93,7 @@ class Daemon:
         self._code_lock = threading.Lock()
         self.autopilot = None          # workstream D: opt-in auto-replies
         self._autopilot_groups = None  # lazily-created GroupChat for it
+        self._fleet_groups = None      # lazily-created GroupChat for fleet
 
     # ------------------------------------------------------------ state
 
@@ -108,8 +109,24 @@ class Daemon:
             "handle": self.conn.handle if self.conn else None,
             "code": code,
             "code_expires_at": exp or None,
+            "fleet": self._fleet_status(),
             "now": now,
         }
+
+    def _fleet_status(self):
+        try:
+            cfg = self._fleet_cfg()
+            members = None
+            if cfg.get("group_id") and self.conn is not None:
+                g = self._fleet_group_chat().get_group(cfg["group_id"])
+                members = len(g["members"]) if g else None
+            return {"auto_join": bool(cfg.get("auto_join")),
+                    "group_id": cfg.get("group_id"),
+                    "group_name": cfg.get("group_name"),
+                    "members": members}
+        except Exception:  # noqa: BLE001
+            return {"auto_join": False, "group_id": None,
+                    "group_name": None, "members": None}
 
     def _publish(self):
         st = self._status()
@@ -197,6 +214,11 @@ class Daemon:
         except Exception:  # noqa: BLE001
             pass
         try:
+            # Fleet auto-join: newly paired peers land in the fleet group.
+            self.conn.pairing.on_pairing_complete(self._fleet_auto_add)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             self.conn.on_file_offer(_on_file)
         except Exception:  # noqa: BLE001
             pass
@@ -256,6 +278,74 @@ class Daemon:
             os.replace(tmp, path)
         except Exception as e:  # noqa: BLE001 - never break pairing on this
             LOG.warning("could not record pairing request: %s", e)
+
+    # ------------------------------------------------------ fleet auto-join
+    # When enabled (state_dir/fleet.json -> {"auto_join": true}), every
+    # peer that completes pairing with this daemon is automatically added
+    # to the fleet group room, so a newly paired agent joins the fleet
+    # with no manual step. Peers paired before this was enabled are NOT
+    # grandfathered in.
+
+    def _fleet_cfg_path(self):
+        return os.path.join(self.args.state_dir, "fleet.json")
+
+    def _fleet_cfg(self):
+        cfg = {"auto_join": False, "group_name": "Phoenix Fleet",
+               "group_id": None}
+        try:
+            with open(self._fleet_cfg_path(), "r", encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict):
+                cfg.update({k: loaded[k] for k in cfg if k in loaded})
+        except (OSError, ValueError):
+            pass
+        return cfg
+
+    def _fleet_save(self, cfg):
+        _write_json(self._fleet_cfg_path(), cfg)
+
+    def _fleet_group_chat(self):
+        if self._fleet_groups is None:
+            from acp_connector.groups import GroupChat
+            self._fleet_groups = GroupChat(self.conn)
+        return self._fleet_groups
+
+    def _fleet_ensure(self):
+        """Return the fleet group_id, creating the group on first use."""
+        cfg = self._fleet_cfg()
+        groups = self._fleet_group_chat()
+        gid = cfg.get("group_id")
+        if gid:
+            g = groups.get_group(gid)
+            if g is not None and g.get("admin_id") == self.conn.peer_id:
+                return gid
+            LOG.warning("fleet group %s missing or not ours; recreating",
+                        (gid or "")[:12])
+        gid = groups.create_group(cfg.get("group_name") or "Phoenix Fleet",
+                                  [])
+        cfg["group_id"] = gid
+        self._fleet_save(cfg)
+        LOG.warning("fleet group created: %s (%s)", cfg.get("group_name"),
+                    gid[:12])
+        return gid
+
+    def _fleet_auto_add(self, peer_pid, peer_handle, role):
+        """PairingManager.on_pairing_complete callback: pull the newly
+        paired peer into the fleet group when auto-join is enabled."""
+        try:
+            if not self._fleet_cfg().get("auto_join"):
+                return
+            gid = self._fleet_ensure()
+            groups = self._fleet_group_chat()
+            g = groups.get_group(gid) or {}
+            if peer_pid in (g.get("members") or []):
+                return
+            groups.add_member(gid, peer_pid)
+            LOG.warning("fleet auto-join: %s (%s) added to fleet group",
+                        peer_handle or "?", peer_pid[:12])
+        except Exception as e:  # noqa: BLE001 - never break pairing on this
+            LOG.warning("fleet auto-join failed for %s: %s",
+                        (peer_pid or "")[:12], e)
 
     def _serve_until_drop(self, link):
         """Block until the link drops (the Connector's reader thread owns
@@ -318,6 +408,12 @@ class Daemon:
         LOG.info("identity loaded: %s (%s)", self.conn.handle,
                  self.conn.peer_id[:12] + "...")
         self._register_callbacks()
+        if getattr(self.args, "fleet_auto_join", False):
+            cfg = self._fleet_cfg()
+            if not cfg.get("auto_join"):
+                cfg["auto_join"] = True
+                self._fleet_save(cfg)
+            LOG.warning("fleet auto-join ENABLED")
 
         backoff_idx = 0
         while not self._stop.is_set():
@@ -367,6 +463,9 @@ def main(argv=None):
     ap.add_argument("--pid-file", default=None, help="write PID here")
     ap.add_argument("--log-level", default="INFO",
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    ap.add_argument("--fleet-auto-join", action="store_true",
+                    help="newly paired peers are automatically added to the"
+                    " fleet group room (persisted in state_dir/fleet.json)")
     args = ap.parse_args(argv)
 
     logging.basicConfig(
