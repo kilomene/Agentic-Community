@@ -11,12 +11,12 @@ Behavior:
   * claims a 6-letter pairing code on every (re)connect (ttl 1h) and
     writes it to <state-dir>/pair-code.json so the owner can read it out
     for pairing:  {"code": "KX7Q2M", "claimed_at": ..., "expires_at": ...}
-  * the code is PERMANENT: on every (re)connect the daemon re-claims the
-    code recorded in pair-code.json instead of minting a fresh random one,
-    so the owner's published code never changes across restarts or
-    updates. Only if the recorded code is taken by someone else does it
-    fall back to a fresh random claim (and records that as the new
-    permanent code).
+  * the code is PERMANENT for life (owner's order): on every (re)connect
+    the daemon re-claims the code recorded in pair-code.json instead of
+    minting a fresh random one, so the owner's published code never
+    changes across restarts, updates, drops, or races — no matter what.
+    A failed claim is retried with the SAME code on the next cycle; the
+    daemon never falls back to a fresh random claim.
   * writes <state-dir>/relay-status.json on every state change:
     {"connected": bool, "url": ..., "since": ..., "peer_id": ...,
      "handle": ..., "code": ..., "code_expires_at": ...}
@@ -193,8 +193,16 @@ class Daemon:
         return None
 
     def _claim_code(self, preferred):
-        """Claim a pairing code; fall back to random when preferred is
-        taken (or absent). Returns the claimed code or None."""
+        """Claim a pairing code.
+
+        Owner's order: ONE permanent pairing code per agent for life.
+        When `preferred` is set, this claims THAT code and only that
+        code — a failed claim is retried on the next refresh cycle, it
+        is NEVER replaced by minting a fresh code. A fresh code is
+        minted only when `preferred` is None (first boot: the code's
+        birth, after which it is recorded as permanent).
+        Returns the claimed code or None.
+        """
         from acp_proto import AcpError
         if preferred:
             try:
@@ -203,16 +211,13 @@ class Daemon:
                 LOG.info("pairing code re-claimed (permanent): %s", code)
                 return code
             except AcpError as e:  # noqa: BLE001
-                detail = str(getattr(e, "detail", e))
-                if "taken" in detail or "must be 6 chars" in detail:
-                    # taken by someone else, or recorded under an older
-                    # alphabet: claim a fresh one instead
-                    LOG.warning("preferred pairing code %s unusable (%s); "
-                                "claiming a fresh one", preferred, detail)
-                else:
-                    LOG.warning("pair-code claim failed (%s); continuing "
-                                "without one", e)
-                    return None
+                # Never rotate: keep the permanent code; the refresh
+                # cycle retries this same claim (the usual cause is the
+                # relay-side reconnect race, which clears on its own).
+                LOG.warning("permanent pairing code %s claim failed (%s); "
+                            "keeping it and retrying (never rotating)",
+                            preferred, e)
+                return None
         try:
             return self.conn.relay_claim_code(ttl=PAIR_CODE_TTL)
         except AcpError as e:  # noqa: BLE001
@@ -450,16 +455,21 @@ class Daemon:
                 pass
 
     def _refresh_code_if_needed(self):
-        """Re-claim the pairing code before it expires (relay-side TTL).
+        """Keep the permanent pairing code claimed on the relay.
 
-        Always re-claims the SAME code, so the owner's published code never
-        changes. If the code was somehow taken meanwhile, falls back to a
-        fresh claim (which then becomes the new permanent code).
+        Re-claims the SAME code before its relay-side TTL expires. If the
+        daemon currently holds no live claim (e.g. the connect-time claim
+        failed), it keeps trying the recorded permanent code every cycle —
+        never minting a fresh one. The owner's published code never
+        changes, no matter what.
         """
         with self._code_lock:
             code, exp = self.code, self.code_expires_at
         if not code:
-            return
+            code = self._preferred_code()
+            if not code:
+                return  # first boot with no recorded code yet
+            exp = 0  # force an immediate (re-)claim attempt
         if exp - time.time() > PAIR_CODE_REFRESH_AT:
             return
         if self.link is None or self.link.closed:
@@ -470,8 +480,6 @@ class Daemon:
         with self._code_lock:
             self.code = new_code
             self.code_expires_at = int(time.time()) + PAIR_CODE_TTL
-        if new_code != code:
-            LOG.info("pairing code changed: %s -> %s", code, new_code)
         self._publish()
 
     # -------------------------------------------------------------- run
