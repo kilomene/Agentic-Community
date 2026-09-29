@@ -264,3 +264,33 @@ def test_pairing_request_prunes_superseded_records(daemon_env):
     codes = [r["code"] for r in recs]
     assert "OLD111" not in codes, "stale superseded code still recorded"
     assert "NEW222" in codes
+
+
+def test_on_message_callback_matches_connector_signature(tmp_path):
+    """Regression: Messaging invokes on_message cbs as cb(sender, text,
+    msg_id) (3 args). The daemon's handler must accept all three — a
+    2-arg handler raised TypeError on every inbound message, which the
+    connector swallowed into audit.message.callback_error, so messages
+    were stored and acked but never surfaced in the daemon log."""
+    from types import SimpleNamespace
+
+    captured = {}
+
+    class FakeConn:
+        def on_message(self, cb):
+            captured["cb"] = cb
+
+        def on_pairing_request(self, cb):
+            pass
+
+        def on_file_offer(self, cb):
+            pass
+
+    d = Daemon.__new__(Daemon)
+    d.conn = FakeConn()
+    d.args = SimpleNamespace(state_dir=str(tmp_path / "state"))
+    Daemon._register_callbacks(d)
+
+    cb = captured["cb"]
+    # Exactly how acp_connector/messaging.py invokes it:
+    cb("peer-abc", "Hello, how are you doing phoenix", "e2401fa513f0")
