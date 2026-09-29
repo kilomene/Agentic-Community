@@ -267,11 +267,16 @@ class PairingManager:
         payload = env["payload"]
         peer_pid = env["from"]
         with self._lock:
-            for s in list(self._sessions.values()):
+            for sid, s in list(self._sessions.items()):
                 if (s.peer_pid == peer_pid and s.role == "responder"
                         and s.state != "done"):
-                    s.state = "failed"
-                    s._persist()
+                    # A fresh request supersedes any earlier one from the
+                    # same peer: fail it AND drop it from the live map so
+                    # dead sessions don't accumulate (the sweep only
+                    # expires non-failed sessions; failed ones would sit
+                    # here forever and their codes stay readable).
+                    s._fail("superseded by newer request")
+                    del self._sessions[sid]
         session = self._new_session(
             "responder", peer_pid=peer_pid,
             peer_handle=payload.get("handle", ""),
