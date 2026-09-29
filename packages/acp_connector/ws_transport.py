@@ -342,6 +342,15 @@ class WsConn:
         except AcpError:
             pass  # best effort; the read loop will notice a dead socket
 
+    def send_ping(self, payload=b""):
+        """Send a WebSocket ping frame (keepalive). The peer's runtime
+        answers with a pong automatically. Raises AcpError on failure
+        and marks the connection closed, like any other send."""
+        payload = bytes(payload or b"")
+        if len(payload) > 125:  # control frames carry at most 125 bytes
+            raise AcpError("BAD_ENVELOPE", "ping payload too large")
+        self._send_frame_bytes(_encode_frame(0x9, payload))
+
     # ------------------------------------------------------------------ read
     def _read_exactly(self, n):
         while len(self._buf) < n:
