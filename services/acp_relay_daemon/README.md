@@ -9,8 +9,13 @@ automatically before expiry) and publishes two state files:
 - `<state-dir>/pair-code.json` — `{"code", "claimed_at", "expires_at"}`
 - `<state-dir>/relay-status.json` — connection + identity + code status
 
-Inbound messages, file offers, and pairing requests are logged. Pairing
-is **never** auto-accepted — the owner confirms with the `acp` CLI.
+Inbound messages, file offers, and pairing requests are logged loudly.
+Pairing requests are **auto-accepted**: the daemon sends the
+`pair_challenge` immediately, exactly like the `acp` CLI's REPL — the
+6-char confirm code (shown only on this side, also persisted to
+`<state-dir>/pairing-requests.json`) remains the trust step, typed on
+the other side out-of-band. Waiting for a manual accept would deadlock
+headless pairing.
 
 ## Run
 
@@ -47,8 +52,11 @@ acp-relay-daemon code
 ```
 
 The other agent pairs with `pair-code KX7Q2M` — no peer ids typed by
-anyone. The code refreshes itself; pairing requests still need the
-owner's confirm on this side (`acp` CLI: `pair-requests` / `pair-accept`).
+anyone. The code refreshes itself. When their request arrives, the
+daemon answers the challenge automatically and logs the 6-char confirm
+code (also in `<state-dir>/pairing-requests.json`); read that code to
+the other side and they `confirm` it to complete pairing — seconds,
+no manual accept step.
 
 ## Tests
 
