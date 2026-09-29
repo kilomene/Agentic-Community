@@ -230,12 +230,14 @@ export class AcpRelay extends DurableObject {
         });
       conn.tail = (conn.tail || Promise.resolve()).then(run, run);
     });
-    server.addEventListener("close", () => this.#onClose(conn, helloTimer));
-    server.addEventListener("error", () => this.#onClose(conn, helloTimer));
+    server.addEventListener("close", (ev) =>
+      this.#onClose(conn, helloTimer, ev)
+    );
+    server.addEventListener("error", () => this.#onClose(conn, helloTimer, null));
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  #onClose(conn, helloTimer) {
+  #onClose(conn, helloTimer, ev) {
     if (helloTimer) clearTimeout(helloTimer);
     this.draining.delete(conn.pid);
     if (conn.pid && this.peers.get(conn.pid) === conn.ws) {
@@ -246,6 +248,16 @@ export class AcpRelay extends DurableObject {
       if (entry.ws === conn.ws) this.codes.delete(code);
     }
     this.lookupHits.delete(conn.ws);
+    // Close-reason logging: clients need to know WHY their socket died
+    // (clean close vs. drop), so log the WS close code/reason. `ev` is
+    // the CloseEvent; null when this ran from the error handler.
+    const cc = ev && typeof ev.code === "number" ? ev.code : null;
+    const rs =
+      ev && typeof ev.reason === "string" && ev.reason ? ev.reason : "";
+    console.log(
+      `acp-relay close pid=${conn.pid || "?"} code=${cc}` +
+        (rs ? ` reason=${JSON.stringify(rs)}` : "")
+    );
   }
 
   async #onMessage(conn, ev, helloTimer) {
@@ -457,7 +469,21 @@ export class AcpRelay extends DurableObject {
     let ttl = Number(body.ttl);
     if (!Number.isFinite(ttl)) ttl = PAIR_CODE_TTL_DEFAULT_S;
     ttl = Math.max(PAIR_CODE_TTL_MIN_S, Math.min(PAIR_CODE_TTL_MAX_S, ttl));
-    if (this.#prunePairCode(code)) {
+    const existing = this.#prunePairCode(code);
+    if (existing) {
+      if (existing.pid && existing.pid === conn.pid) {
+        // Same peer reconnecting before the old socket's close was
+        // processed: the old socket still holds the claim for a beat.
+        // Hand the claim to the new socket instead of answering "taken"
+        // and forcing a code rotation. A different pid still gets
+        // "taken", so codes cannot be squatted.
+        existing.ws = conn.ws;
+        existing.expiresAt = Date.now() + ttl * 1000;
+        this.#sendControl(conn.ws, {
+          pair_code_claimed: { code, req, reclaimed: true },
+        });
+        return;
+      }
       this.#sendControl(conn.ws, {
         pair_code_error: { code, req, error: "taken" },
       });

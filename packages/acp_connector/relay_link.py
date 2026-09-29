@@ -143,6 +143,16 @@ class RelayLink:
                          on_error)
         finally:
             self._closed = True
+            # Close-reason logging: record WHY the relay link died so the
+            # next debug session can tell a clean close (code present)
+            # from a raw TCP drop (no close frame at all).
+            try:
+                self._c.audit.log(
+                    "relay.link_closed", actor="relay", result="closed",
+                    details={"close_code": ws.close_code,
+                             "close_reason": ws.close_reason})
+            except Exception:
+                pass
 
     def _handle_frame(self, obj, on_envelope):
         """Route one parsed JSON frame. Never raises."""

@@ -305,6 +305,11 @@ class WsConn:
         self._closed = False
         self._buf = bytearray(initial)
         self.peer_addr = None
+        # Last RFC 6455 close frame seen on this connection (None when the
+        # socket died without one, e.g. TCP drop). Populated by read_loop
+        # so callers can log WHY the connection died.
+        self.close_code = None
+        self.close_reason = ""
 
     @property
     def closed(self):
@@ -406,6 +411,7 @@ class WsConn:
                 except _PeerClosed:
                     break
                 if opcode == 0x8:  # close
+                    self._note_close_frame(payload)
                     break
                 elif opcode == 0x9:  # ping
                     self._send_pong(payload)
@@ -433,6 +439,18 @@ class WsConn:
                     pass
         finally:
             self.close()
+
+    def _note_close_frame(self, payload):
+        """Parse an RFC 6455 close frame payload (2-byte code + UTF-8
+        reason) into close_code/close_reason. Never raises; a missing or
+        malformed payload leaves the defaults (None/"")."""
+        try:
+            if len(payload) >= 2:
+                self.close_code = int.from_bytes(payload[:2], "big")
+                self.close_reason = bytes(payload[2:]).decode(
+                    "utf-8", "replace")
+        except Exception:
+            pass
 
     # ----------------------------------------------------------------- close
     def close(self):
