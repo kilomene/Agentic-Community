@@ -263,3 +263,161 @@ def test_queued_notices_are_fifo_per_pid(monkeypatch):
     assert conn._pop_relay_queued("pidA") == "mbx1"
     assert conn._pop_relay_queued("pidA") == "mbx2"
     assert conn._pop_relay_queued("pidA") is None
+
+
+# ------------------------------------------------- pair-code directory tests
+
+import threading  # noqa: E402
+
+
+def _pair_req_in_thread(link, fn, *args, **kw):
+    out = {}
+
+    def run():
+        try:
+            out["value"] = fn(*args, **kw)
+        except Exception as e:  # noqa: BLE001
+            out["error"] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, out
+
+
+def _last_control(fake):
+    """Most recent sent control frame as (obj, req)."""
+    obj = _decoded_sends(fake)[-1]
+    key = next(k for k in obj if k.startswith("pair_code_"))
+    return obj, obj[key].get("req")
+
+
+def test_claim_pair_code_roundtrip(monkeypatch):
+    conn, link, fake = _link_with_fake(monkeypatch, [])
+    t, out = _pair_req_in_thread(link, link.claim_pair_code, timeout=5)
+    deadline = 5
+    while len(_decoded_sends(fake)) < 2 and deadline > 0:
+        threading.Event().wait(0.05)
+        deadline -= 0.05
+    obj, req = _last_control(fake)
+    assert set(obj) == {"pair_code_claim"}
+    assert obj["pair_code_claim"]["ttl"] == 600
+    link._handle_frame({"pair_code_claimed":
+                        {"code": obj["pair_code_claim"]["code"],
+                         "req": req}}, lambda env: None)
+    t.join(5)
+    assert out.get("value") == obj["pair_code_claim"]["code"]
+    assert len(out["value"]) == 6
+
+
+def test_claim_pair_code_retries_on_taken(monkeypatch):
+    conn, link, fake = _link_with_fake(monkeypatch, [])
+    t, out = _pair_req_in_thread(link, link.claim_pair_code, timeout=5)
+    codes = []
+    for _ in range(2):
+        deadline = 5
+        while len(_decoded_sends(fake)) < 2 + len(codes) and deadline > 0:
+            threading.Event().wait(0.05)
+            deadline -= 0.05
+        obj, req = _last_control(fake)
+        codes.append(obj["pair_code_claim"]["code"])
+        if len(codes) == 1:
+            link._handle_frame({"pair_code_error":
+                                {"code": codes[0], "req": req,
+                                 "error": "taken"}}, lambda env: None)
+        else:
+            link._handle_frame({"pair_code_claimed":
+                                {"code": codes[1], "req": req}}, lambda env: None)
+    t.join(5)
+    assert out.get("value") == codes[1]
+    assert codes[0] != codes[1]
+
+
+def test_claim_pair_code_rejects_bad_code_locally(monkeypatch):
+    conn, link, fake = _link_with_fake(monkeypatch, [])
+    with pytest.raises(AcpError):
+        link.claim_pair_code(code="nope!")
+    assert len(_decoded_sends(fake)) == 1  # hello only; nothing sent
+
+
+def test_lookup_pair_code_roundtrip(monkeypatch):
+    conn, link, fake = _link_with_fake(monkeypatch, [])
+    t, out = _pair_req_in_thread(link, link.lookup_pair_code, "kq7m2x",
+                                 timeout=5)
+    deadline = 5
+    while len(_decoded_sends(fake)) < 2 and deadline > 0:
+        threading.Event().wait(0.05)
+        deadline -= 0.05
+    obj, req = _last_control(fake)
+    assert obj["pair_code_lookup"]["code"] == "KQ7M2X"  # normalized
+    link._handle_frame({"pair_code_result":
+                        {"code": "KQ7M2X", "req": req, "pid": "PID-OWNER"}}, lambda env: None)
+    t.join(5)
+    assert out.get("value") == "PID-OWNER"
+
+
+def test_lookup_pair_code_not_found(monkeypatch):
+    conn, link, fake = _link_with_fake(monkeypatch, [])
+    t, out = _pair_req_in_thread(link, link.lookup_pair_code, "KQ7M2X",
+                                 timeout=5)
+    deadline = 5
+    while len(_decoded_sends(fake)) < 2 and deadline > 0:
+        threading.Event().wait(0.05)
+        deadline -= 0.05
+    obj, req = _last_control(fake)
+    link._handle_frame({"pair_code_result":
+                        {"code": "KQ7M2X", "req": req,
+                         "pid": None, "error": "not_found"}}, lambda env: None)
+    t.join(5)
+    assert isinstance(out.get("error"), AcpError)
+    assert out["error"].code == "NOT_FOUND"
+
+
+def test_lookup_pair_code_rate_limited(monkeypatch):
+    conn, link, fake = _link_with_fake(monkeypatch, [])
+    t, out = _pair_req_in_thread(link, link.lookup_pair_code, "KQ7M2X",
+                                 timeout=5)
+    deadline = 5
+    while len(_decoded_sends(fake)) < 2 and deadline > 0:
+        threading.Event().wait(0.05)
+        deadline -= 0.05
+    obj, req = _last_control(fake)
+    link._handle_frame({"pair_code_result":
+                        {"code": "KQ7M2X", "req": req,
+                         "pid": None, "error": "rate_limited"}}, lambda env: None)
+    t.join(5)
+    assert isinstance(out.get("error"), AcpError)
+    assert out["error"].code == "RATE_LIMITED"
+
+
+def test_release_pair_code(monkeypatch):
+    conn, link, fake = _link_with_fake(monkeypatch, [])
+    t, out = _pair_req_in_thread(link, link.release_pair_code, "kq7m2x",
+                                 timeout=5)
+    deadline = 5
+    while len(_decoded_sends(fake)) < 2 and deadline > 0:
+        threading.Event().wait(0.05)
+        deadline -= 0.05
+    obj, req = _last_control(fake)
+    assert set(obj) == {"pair_code_release"}
+    link._handle_frame({"pair_code_released":
+                        {"code": "KQ7M2X", "req": req}}, lambda env: None)
+    t.join(5)
+    assert out.get("value") is True
+
+
+def test_pair_initiate_code_resolves_then_pairs():
+    from acp_connector.pairing import PairingManager  # noqa: E402
+
+    class _StubConnector:
+        def relay_lookup_code(self, code):
+            assert code == "kq7m2x"
+            return "PID-OWNER"
+
+    mgr = PairingManager(_StubConnector())
+    seen = {}
+    def _fake_pair(pid):
+        seen["pid"] = pid
+        return "S"
+    mgr.pair_initiate_relay = _fake_pair
+    assert mgr.pair_initiate_code("kq7m2x") == "S"
+    assert seen["pid"] == "PID-OWNER"

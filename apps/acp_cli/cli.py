@@ -370,6 +370,32 @@ class AcpShell(cmd.Cmd):
                    "other side>")
 
     @guard
+    def do_new_code(self, arg):
+        """new-code — claim a 6-letter pairing code on the relay. Read it
+        to the other person; they type:  pair-code <code>"""
+        code = self.conn.relay_claim_code()
+        self._emit("")
+        self._emit("Your pairing code:  %s" % code)
+        self._emit("")
+        self._emit("The other side connects with the relay and types:")
+        self._emit("    pair-code %s" % code)
+        self._emit("Code expires in 10 minutes.")
+
+    @guard
+    def do_pair_code(self, arg):
+        """pair-code <code> — pair with the agent holding this 6-letter
+        relay code (no peer id needed)."""
+        code = arg.strip()
+        if not code:
+            raise AcpError("INTERNAL", "usage: pair-code <code>")
+        session = self.conn.pairing.pair_initiate_code(code)
+        self._pending_pair = session
+        self._emit("Pairing request sent via relay (code %s)."
+                   % code.strip().upper())
+        self._emit("Waiting for code — type:  confirm <code shown on "
+                   "other side>")
+
+    @guard
     def do_confirm(self, arg):
         """confirm <code> — submit the pairing code shown on the other side."""
         code = arg.strip()

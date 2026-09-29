@@ -237,9 +237,25 @@ python3 apps/acp_cli/cli.py relay --home ~/.acp-bob \
     --url wss://acp-relay.ayiijumo.workers.dev/acp
 ```
 
-In Alice's REPL: `pair-pid <bob-peer-id>` instead of `pair <host>
-<port>` — everything else (`confirm`, `msg`, `send-file`, …) works
-exactly as before.
+Nobody types a peer id. In Alice's REPL:
+
+```
+new-code
+```
+
+Alice reads the 6-letter code out to Bob. In Bob's REPL:
+
+```
+pair-code KX7Q2M
+```
+
+The relay resolves the code to Alice's peer id and the normal pairing
+handshake runs — Bob still confirms the code shown on Alice's screen,
+so the 6 letters are a rendezvous, not the authentication. Codes expire
+after 10 minutes and lookups are rate-limited on the relay.
+
+In Alice's REPL the old `pair-pid <peer-id>` still works when you do
+have the id; `pair-code` replaces it for humans.
 
 ```python
 from acp_connector import Connector

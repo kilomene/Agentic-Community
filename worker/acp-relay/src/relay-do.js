@@ -24,6 +24,22 @@ const CHUNK = 100 * 1024; // DO storage values cap at 128 KiB; stay under it
 
 const B62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
+// Pairing-code directory (short rendezvous codes so nobody types a peer id).
+//   {pair_code_claim:   {code: "ABC123", ttl: 600, req}} -> {pair_code_claimed: {code, req}}
+//                                                        or {pair_code_error: {code, req, error}}
+//   {pair_code_release: {code, req}}                     -> {pair_code_released: {code, req}}
+//   {pair_code_lookup:  {code, req}}                     -> {pair_code_result: {code, req, pid}}
+//                                                        or {pair_code_result: {code, req, pid: null, error}}
+// Codes are a RENDEZVOUS, not authentication: 32^6 space (~30 bits),
+// per-connection lookup rate limiting, TTL-bounded. The pairing handshake
+// still requires the responder's on-screen confirm code + key verification.
+const PAIR_CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
+const PAIR_CODE_TTL_DEFAULT_S = 600;
+const PAIR_CODE_TTL_MIN_S = 60;
+const PAIR_CODE_TTL_MAX_S = 3600;
+const PAIR_LOOKUP_PER_MIN = 30;
+const PAIR_LOOKUP_WINDOW_MS = 60_000;
+
 // ---------------------------------------------------------------- helpers
 
 // b62decode mirroring acp_proto.b62decode: minimal big-endian bytes,
@@ -153,6 +169,8 @@ export class AcpRelay extends DurableObject {
     this.draining = new Set(); // pids with a mailbox drain in flight
     this.nextId = 1; // persisted mailbox id counter
     this.queues = new Map(); // pid -> { entries: [{id,ts,size,n}], bytes }
+    this.codes = new Map(); // pair code -> { pid, expiresAt, ws }
+    this.lookupHits = new Map(); // ws -> [timestamp ms] (lookup rate limit)
     // No fetch/message is processed until persisted state is loaded.
     ctx.blockConcurrencyWhile(() => this.#load());
   }
@@ -223,6 +241,11 @@ export class AcpRelay extends DurableObject {
     if (conn.pid && this.peers.get(conn.pid) === conn.ws) {
       this.peers.delete(conn.pid);
     }
+    // Release this connection's pair codes so they cannot be squatted.
+    for (const [code, entry] of this.codes) {
+      if (entry.ws === conn.ws) this.codes.delete(code);
+    }
+    this.lookupHits.delete(conn.ws);
   }
 
   async #onMessage(conn, ev, helloTimer) {
@@ -343,6 +366,18 @@ export class AcpRelay extends DurableObject {
       await this.#handleAck(conn, obj);
       return;
     }
+    if ("pair_code_claim" in obj) {
+      this.#handlePairCodeClaim(conn, obj);
+      return;
+    }
+    if ("pair_code_release" in obj) {
+      this.#handlePairCodeRelease(conn, obj);
+      return;
+    }
+    if ("pair_code_lookup" in obj) {
+      this.#handlePairCodeLookup(conn, obj);
+      return;
+    }
     if (looksLikeEnvelope(obj)) {
       const target = obj.to;
       const peer = this.peers.get(target);
@@ -389,6 +424,85 @@ export class AcpRelay extends DurableObject {
     }
     // Only this connection's pid queue is ever touched.
     this.#sendControl(conn.ws, { mailbox_ack: { acked: n } });
+  }
+
+  // -- pair-code directory -----------------------------------------------
+  // Short rendezvous codes so agents pair without exchanging peer ids.
+
+  #normalizePairCode(raw) {
+    if (typeof raw !== "string") return null;
+    const code = raw.trim().toUpperCase();
+    return PAIR_CODE_RE.test(code) ? code : null;
+  }
+
+  #prunePairCode(code) {
+    const entry = this.codes.get(code);
+    if (entry && entry.expiresAt <= Date.now()) {
+      this.codes.delete(code);
+      return null;
+    }
+    return entry || null;
+  }
+
+  #handlePairCodeClaim(conn, obj) {
+    const body = obj.pair_code_claim;
+    const req = body && typeof body.req === "string" ? body.req : "";
+    const code = this.#normalizePairCode(body ? body.code : null);
+    if (!code) {
+      this.#sendControl(conn.ws, {
+        pair_code_error: { code: null, req, error: "invalid_code" },
+      });
+      return;
+    }
+    let ttl = Number(body.ttl);
+    if (!Number.isFinite(ttl)) ttl = PAIR_CODE_TTL_DEFAULT_S;
+    ttl = Math.max(PAIR_CODE_TTL_MIN_S, Math.min(PAIR_CODE_TTL_MAX_S, ttl));
+    if (this.#prunePairCode(code)) {
+      this.#sendControl(conn.ws, {
+        pair_code_error: { code, req, error: "taken" },
+      });
+      return;
+    }
+    this.codes.set(code, {
+      pid: conn.pid,
+      expiresAt: Date.now() + ttl * 1000,
+      ws: conn.ws,
+    });
+    this.#sendControl(conn.ws, { pair_code_claimed: { code, req } });
+  }
+
+  #handlePairCodeRelease(conn, obj) {
+    const body = obj.pair_code_release;
+    const req = body && typeof body.req === "string" ? body.req : "";
+    const code = this.#normalizePairCode(body ? body.code : null);
+    if (code) {
+      const entry = this.codes.get(code);
+      if (entry && entry.ws === conn.ws) this.codes.delete(code);
+    }
+    this.#sendControl(conn.ws, { pair_code_released: { code, req } });
+  }
+
+  #handlePairCodeLookup(conn, obj) {
+    const body = obj.pair_code_lookup;
+    const req = body && typeof body.req === "string" ? body.req : "";
+    const code = this.#normalizePairCode(body ? body.code : null);
+    const reply = (extra) =>
+      this.#sendControl(conn.ws, { pair_code_result: { code, req, ...extra } });
+    if (!code) return reply({ pid: null, error: "invalid_code" });
+    // Rate-limit lookups per connection: codes are ~30 bits, so guessing
+    // them out is infeasible, but slow the attempts down anyway.
+    const now = Date.now();
+    let hits = this.lookupHits.get(conn.ws) || [];
+    hits = hits.filter((t) => now - t < PAIR_LOOKUP_WINDOW_MS);
+    if (hits.length >= PAIR_LOOKUP_PER_MIN) {
+      this.lookupHits.set(conn.ws, hits);
+      return reply({ pid: null, error: "rate_limited" });
+    }
+    hits.push(now);
+    this.lookupHits.set(conn.ws, hits);
+    const entry = this.#prunePairCode(code);
+    if (!entry) return reply({ pid: null, error: "not_found" });
+    return reply({ pid: entry.pid });
   }
 
   // -- mailbox storage ------------------------------------------------

@@ -192,6 +192,17 @@ class PairingManager:
                     result="ok", details={"session": session.session_id})
         return session
 
+    def pair_initiate_code(self, relay_code):
+        """Pair using a 6-char relay pairing code instead of a peer id.
+
+        The other agent claims the code first (``new-code``); the relay
+        resolves it to their peer id, then the normal relay handshake
+        runs — including the on-screen confirm code. The peer id is
+        never typed by either side.
+        """
+        pid = self._c.relay_lookup_code(relay_code)
+        return self.pair_initiate_relay(pid)
+
     def pair_initiate_relay(self, peer_pid):
         """Start pairing with a peer reachable via the relay (no dial).
 

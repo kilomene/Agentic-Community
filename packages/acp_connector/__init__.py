@@ -138,6 +138,31 @@ class Connector:
                        details={"url": url})
         return link
 
+    def _require_relay_link(self):
+        link = self._relay_link
+        if link is None or link.closed:
+            raise AcpError("INTERNAL",
+                           "no relay link — relay_connect(url) first")
+        return link
+
+    def relay_claim_code(self, code=None, ttl=600):
+        """Claim a 6-char pairing code on the relay for this agent.
+
+        The other agent then pairs with ``pair-code <code>`` instead of
+        typing a peer id. Returns the claimed code (uppercase).
+        """
+        from .relay_link import PAIR_CODE_TTL_DEFAULT  # noqa: F401
+        return self._require_relay_link().claim_pair_code(
+            code=code, ttl=ttl)
+
+    def relay_release_code(self, code):
+        """Release a pairing code claimed by this agent (best effort)."""
+        return self._require_relay_link().release_pair_code(code)
+
+    def relay_lookup_code(self, code):
+        """Resolve a 6-char pairing code to the owner's peer id."""
+        return self._require_relay_link().lookup_pair_code(code)
+
     def _on_relay_queued(self, to_pid, mailbox_id):
         """The relay stored an envelope for to_pid in its mailbox.
         Called from the RelayLink reader thread; never raises."""
