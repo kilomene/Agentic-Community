@@ -58,6 +58,37 @@ code (also in `<state-dir>/pairing-requests.json`); read that code to
 the other side and they `confirm` it to complete pairing — seconds,
 no manual accept step.
 
+## Fleet auto-join — newly paired agents join the group automatically
+
+Pairing requests auto-accept, and with fleet auto-join on, every peer
+that *completes* pairing is automatically added to the fleet group
+room — a newly paired agent joins the fleet with no manual step.
+
+```bash
+acp-relay-daemon start --fleet-auto-join   # enable (persisted)
+```
+
+State lives in `<state-dir>/fleet.json`:
+
+```json
+{"auto_join": true, "group_name": "Phoenix Fleet", "group_id": "…"}
+```
+
+Notes:
+
+- **Default posture: OFF.** Absent/disabled config means pairing works
+  exactly as before — no group is created, nobody is added.
+- The fleet group is created on first use (empty — just this agent as
+  admin); members are added with an epoch-key rotation, so a new
+  member never sees group history from before it joined.
+- Peers paired *before* auto-join was enabled are NOT grandfathered
+  in; only future pairing completions trigger the add (both
+  initiator and responder roles).
+- A raising/failing add never breaks the handshake — the error is
+  logged and pairing still completes.
+- `acp-relay-daemon status` reports the fleet block (`auto_join`,
+  `group_id`, member count).
+
 ## Autopilot — opt-in autonomous replies
 
 The daemon can answer direct messages and channel posts on its own,
