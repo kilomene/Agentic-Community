@@ -1,21 +1,41 @@
 #!/usr/bin/env python3
 """acp — command-line interface for the ACP 1.0 Agent Community connector.
 
-Three subcommands:
+Interactive subcommands:
 
     acp init  --home DIR --handle NAME   create identity + database
     acp serve --home DIR --port N         start the connector + interactive REPL
     acp relay --home DIR --url wss://..   connect to a relay + interactive REPL
                                           (relay-only mode: no TCP server)
 
+One-shot subcommands (local-only, no relay needed):
+
+    acp inbox [--limit N] [--unread] [--peer PID]
+    acp inbox-read <msg-id>              print a message, then mark it read
+    acp inbox-thread <msg-id>            print a whole reply thread
+    acp presence [--set STATE | --peer PID]
+    acp channel-list
+    acp channel-history <group-id> [--limit N]
+    acp autopilot-status
+
+One-shot subcommands (networked: optional --url to connect a relay first):
+
+    acp send <pid> <text...>
+    acp reply <pid> <msg-id> <text...>
+    acp typing <target> <start|stop> [--group]
+    acp channel-create <name> [--project ID] [--topic T] <members...>
+    acp channel-post <group-id> <text...> [--reply-to ID] [--ref TASKID ...]
+    acp channel-link <group-id> <project-id>
+
 Stdlib only. No network except localhost (and the optional directory URL
 the user passes to `register`, which is also expected to be local in V1),
-plus the relay URL given to `acp relay`.
+plus the relay URL given to `acp relay` or the one-shot --url flag.
 """
 import argparse
 import cmd
 import functools
 import getpass
+import json
 import os
 import re
 import shlex
@@ -166,6 +186,353 @@ def relay_home(home, passphrase, url):
         except Exception:
             pass
         print("stopped.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# one-shot commands (argparse subcommands; each opens a Connector, acts,
+# prints, and stops — no REPL, no server)
+# ---------------------------------------------------------------------------
+
+def resolve_pid(conn, prefix):
+    """Unique-prefix peer lookup; raises AcpError on miss/ambiguity.
+
+    One-shot twin of AcpShell._resolve_pid (the shell method can't be
+    reused here without a shell instance)."""
+    prefix = (prefix or "").strip()
+    if not prefix:
+        raise AcpError("NOT_FOUND", "empty peer id")
+    peers = conn.list_peers(include_revoked=True)
+    matches = [p["agent_id"] for p in peers
+               if p["agent_id"] == prefix
+               or p["agent_id"].startswith(prefix)]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise AcpError("NOT_FOUND", "unknown peer '%s'" % prefix)
+    raise AcpError("INTERNAL",
+                   "ambiguous peer prefix '%s' (%d matches)"
+                   % (prefix, len(matches)))
+
+
+def resolve_group(conn, prefix):
+    """Unique-prefix group lookup; raises AcpError on miss/ambiguity.
+
+    One-shot twin of AcpShell._resolve_group."""
+    prefix = (prefix or "").strip()
+    if not prefix:
+        raise AcpError("NOT_FOUND", "empty group id")
+    matches = [g["group_id"] for g in conn.groups.list_groups()
+               if g["group_id"] == prefix
+               or g["group_id"].startswith(prefix)]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise AcpError("NOT_FOUND", "unknown group '%s'" % prefix)
+    raise AcpError("INTERNAL",
+                   "ambiguous group prefix '%s' (%d matches)"
+                   % (prefix, len(matches)))
+
+
+def _open(home, passphrase):
+    """Open an initialized home's Connector; raises AcpError(NOT_FOUND)
+    when the home was never initialized."""
+    home = os.path.abspath(home)
+    if not os.path.exists(os.path.join(home, "connector.db")):
+        raise AcpError("NOT_FOUND",
+                       "%s is not initialized "
+                       "(run: acp init --home %s --handle NAME first)"
+                       % (home, home))
+    return Connector(home, passphrase)
+
+
+def _maybe_relay(conn, url):
+    """Connect the one-shot Connector to a relay first, when --url given."""
+    if url:
+        conn.relay_connect(url)  # raises AcpError on failure
+
+
+MSG_FIELDS = ("message_id", "sender_id", "scope", "scope_id", "text",
+              "timestamp", "status", "created_at", "read_at", "reply_to",
+              "auto")
+
+
+def cmd_inbox(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        peer = resolve_pid(conn, args.peer) if args.peer else None
+        rows = conn.inbox(limit=args.limit, unread_only=args.unread,
+                          peer_pid=peer)
+        if not rows:
+            print("(inbox empty)")
+            return 0
+        me = conn.peer_id
+        for m in rows:  # inbox() is newest-first already
+            mark = "*" if not m.get("read_at") else " "
+            if m.get("sender_id") == me:
+                arrow, who = "->", "you"
+            else:
+                arrow, who = "<-", _short(m.get("sender_id"))
+            text = m.get("text") or ""
+            if len(text) > 120:
+                text = text[:117] + "..."
+            line = "%s %s %s %-14s %s" % (
+                mark, _fmt_ts(m.get("created_at")), arrow, who, text)
+            if m.get("reply_to"):
+                line += "  [re: %s]" % _short(m["reply_to"], 8)
+            print(line)
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_inbox_read(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        m = conn.get_message(args.msg_id)
+        if m is None:
+            raise AcpError("NOT_FOUND",
+                           "unknown message %s" % args.msg_id)
+        for k in MSG_FIELDS:
+            print("%s: %s" % (k, m.get(k)))
+        for k in m:
+            if k not in MSG_FIELDS:
+                print("%s: %s" % (k, m[k]))
+        conn.mark_read(args.msg_id)
+        print("(marked read)")
+        return 0
+    finally:
+        conn.stop()
+
+
+def _thread_depth(m, by_id):
+    """Depth of a thread message: reply_to hops up to the root."""
+    depth, seen, cur = 0, set(), m
+    while cur.get("reply_to") and cur["reply_to"] in by_id \
+            and cur["reply_to"] not in seen:
+        seen.add(cur["reply_to"])
+        cur = by_id[cur["reply_to"]]
+        depth += 1
+    return depth
+
+
+def cmd_inbox_thread(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        # Oldest-first; raises AcpError(NOT_FOUND) for an unknown id.
+        thread = conn.get_thread(args.msg_id)
+        me = conn.peer_id
+        by_id = {m["message_id"]: m for m in thread}
+        for m in thread:
+            who = "you" if m.get("sender_id") == me \
+                else _short(m.get("sender_id"))
+            print("%s[%s] %s: %s"
+                  % ("  " * _thread_depth(m, by_id),
+                     _fmt_ts(m.get("created_at")), who,
+                     m.get("text") or ""))
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_send(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        _maybe_relay(conn, args.url)
+        pid = resolve_pid(conn, args.pid)
+        mid = conn.send_message(pid, " ".join(args.text))
+        print("sent (%s)" % _short(mid))
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_reply(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        _maybe_relay(conn, args.url)
+        pid = resolve_pid(conn, args.pid)
+        mid = conn.send_reply(pid, args.msg_id, " ".join(args.text))
+        print("sent (%s)" % _short(mid))
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_presence(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        if args.set:
+            conn.set_presence(args.set)
+            print("presence set: %s" % args.set)
+            return 0
+        if args.peer:
+            pid = resolve_pid(conn, args.peer)
+            r = conn.get_presence(pid)
+            print("%s: %s (updated %s)"
+                  % (_short(pid), r.get("status"),
+                     _fmt_ts(r.get("updated_at"))))
+            return 0
+        rows = conn.list_presence()
+        if not rows:
+            print("(no presence records)")
+            return 0
+        me = conn.peer_id
+        print("%-16s %-8s %s" % ("PEER", "STATUS", "UPDATED"))
+        for r in rows:
+            who = "you" if r["agent_id"] == me else _short(r["agent_id"])
+            print("%-16s %-8s %s"
+                  % (who, r.get("status"), _fmt_ts(r.get("updated_at"))))
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_typing(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        _maybe_relay(conn, args.url)
+        if args.group:
+            gid = resolve_group(conn, args.target)
+            if args.action == "start":
+                conn.typing_start_group(gid)
+            else:
+                conn.typing_stop_group(gid)
+            print("typing %s -> group %s" % (args.action, _short(gid)))
+        else:
+            pid = resolve_pid(conn, args.target)
+            if args.action == "start":
+                conn.typing_start(pid)
+            else:
+                conn.typing_stop(pid)
+            print("typing %s -> %s" % (args.action, _short(pid)))
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_channel_create(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        _maybe_relay(conn, args.url)
+        pids = [resolve_pid(conn, m) for m in args.members]
+        gid = conn.groups.open_channel(args.name, pids,
+                                       project_id=args.project,
+                                       topic=args.topic or "")
+        print("channel created: %s" % gid)
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_channel_list(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        groups = conn.groups.list_groups()
+        if not groups:
+            print("(no groups)")
+            return 0
+        print("%-16s %-18s %-7s %-14s %s"
+              % ("GROUP", "NAME", "MEMBERS", "PROJECT", "TOPIC"))
+        for g in groups:
+            chan = conn.groups.get_channel(g["group_id"]) or {}
+            proj = chan.get("project_id") or "-"
+            topic = chan.get("topic") or "-"
+            print("%-16s %-18s %-7d %-14s %s"
+                  % (_short(g["group_id"], 14), (g.get("name") or "?")[:18],
+                     len(chan.get("members") or []), str(proj)[:14],
+                     str(topic)[:40]))
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_channel_post(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        _maybe_relay(conn, args.url)
+        gid = resolve_group(conn, args.group_id)
+        mid = conn.groups.send_channel_message(
+            gid, " ".join(args.text),
+            reply_to=args.reply_to, refs=args.ref or [])
+        print("sent (%s)" % _short(mid))
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_channel_history(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        gid = resolve_group(conn, args.group_id)
+        rows = conn.groups.get_channel_history(gid, limit=args.limit)
+        if not rows:
+            print("(no messages)")
+            return 0
+        me = conn.peer_id
+        for m in rows:  # oldest first
+            who = "you" if m.get("sender_id") == me \
+                else _short(m.get("sender_id"))
+            line = "[%s] %s: %s" % (_fmt_ts(m.get("ts")), who,
+                                    m.get("text") or "")
+            if m.get("reply_to"):
+                line += "  [re: %s]" % _short(m["reply_to"], 8)
+            refs = m.get("refs") or []
+            if refs:
+                line += "  [refs: %s]" % ",".join(str(r) for r in refs)
+            print(line)
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_channel_link(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        _maybe_relay(conn, args.url)
+        gid = resolve_group(conn, args.group_id)
+        conn.groups.link_project(gid, args.project_id)
+        print("channel %s linked to project %s"
+              % (_short(gid), args.project_id))
+        return 0
+    finally:
+        conn.stop()
+
+
+def cmd_autopilot_status(args):
+    path = os.path.join(os.path.abspath(args.home), "autopilot.json")
+    if not os.path.isfile(path):
+        print("autopilot off (no config)")
+        return 0
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError) as e:
+        print("autopilot off (invalid config: %s)" % e)
+        return 0
+    peers = cfg.get("peers") or {}
+    channels = cfg.get("channels") or {}
+    if not peers and not channels:
+        print("autopilot on (nothing opted in)")
+        return 0
+    print("autopilot on")
+    if peers:
+        print("peers (%d):" % len(peers))
+        for pid, entry in sorted(peers.items()):
+            entry = entry or {}
+            hook = (" hook=%s" % entry["hook"]) if entry.get("hook") else ""
+            print("  %s  mode=%s%s max_per_min=%s reply_to_auto=%s"
+                  % (_short(pid), entry.get("mode", "?"), hook,
+                     entry.get("max_per_min", 6),
+                     entry.get("reply_to_auto", False)))
+    if channels:
+        print("channels (%d):" % len(channels))
+        for gid, entry in sorted(channels.items()):
+            entry = entry or {}
+            print("  %s  mode=%s max_per_min=%s reply_to_auto=%s"
+                  % (_short(gid), entry.get("mode", "?"),
+                     entry.get("max_per_min", 6),
+                     entry.get("reply_to_auto", False)))
     return 0
 
 
@@ -1080,6 +1447,107 @@ def build_parser():
     pr.add_argument("--home", required=True, help="home directory")
     pr.add_argument("--url", required=True,
                     help="relay WebSocket URL, e.g. wss://host/path")
+
+    # ---- one-shot messaging commands (local-only) ----
+    pin = sub.add_parser("inbox",
+                         help="list stored messages, newest first")
+    pin.add_argument("--home", required=True, help="home directory")
+    pin.add_argument("--limit", type=int, default=50,
+                     help="max messages to show")
+    pin.add_argument("--unread", action="store_true",
+                     help="only unread messages")
+    pin.add_argument("--peer",
+                     help="only messages from this peer (id or unique prefix)")
+
+    pir = sub.add_parser("inbox-read",
+                         help="print a message in full, then mark it read")
+    pir.add_argument("msg_id", help="message id")
+    pir.add_argument("--home", required=True, help="home directory")
+
+    pit = sub.add_parser("inbox-thread",
+                         help="print a message's whole reply thread, "
+                              "oldest first")
+    pit.add_argument("msg_id", help="message id")
+    pit.add_argument("--home", required=True, help="home directory")
+
+    ppres = sub.add_parser("presence",
+                           help="show all peers' presence; --set to change "
+                                "yours; --peer for one peer")
+    ppres.add_argument("--home", required=True, help="home directory")
+    ppg = ppres.add_mutually_exclusive_group()
+    ppg.add_argument("--set", choices=PRESENCE_STATES,
+                     help="set your presence state")
+    ppg.add_argument("--peer",
+                     help="show one peer's presence (id or unique prefix)")
+
+    pcl = sub.add_parser("channel-list",
+                         help="list groups with their channel project/topic")
+    pcl.add_argument("--home", required=True, help="home directory")
+
+    pch = sub.add_parser("channel-history",
+                         help="show a channel's message history, oldest first")
+    pch.add_argument("group_id", help="group id or unique prefix")
+    pch.add_argument("--limit", type=int, default=20,
+                     help="max messages to show")
+    pch.add_argument("--home", required=True, help="home directory")
+
+    pap = sub.add_parser("autopilot-status",
+                         help="show autopilot opt-ins from autopilot.json")
+    pap.add_argument("--home", required=True, help="home directory")
+
+    # ---- one-shot messaging commands (networked; --url connects a relay) ----
+    psend = sub.add_parser("send",
+                           help="send an E2E direct message (waits for ACK)")
+    psend.add_argument("pid", help="peer id or unique prefix")
+    psend.add_argument("text", nargs="+", help="message text")
+    psend.add_argument("--home", required=True, help="home directory")
+    psend.add_argument("--url", help="relay WebSocket URL (connect first)")
+
+    preply = sub.add_parser("reply",
+                            help="send a threaded E2E reply to a message")
+    preply.add_argument("pid", help="peer id or unique prefix")
+    preply.add_argument("msg_id", help="message id being answered")
+    preply.add_argument("text", nargs="+", help="reply text")
+    preply.add_argument("--home", required=True, help="home directory")
+    preply.add_argument("--url", help="relay WebSocket URL (connect first)")
+
+    ptyp = sub.add_parser("typing",
+                          help="send a typing indicator to a peer or group")
+    ptyp.add_argument("target",
+                      help="peer id/prefix, or group id/prefix with --group")
+    ptyp.add_argument("action", choices=("start", "stop"),
+                      help="typing started or stopped")
+    ptyp.add_argument("--group", action="store_true",
+                      help="target is a group, not a peer")
+    ptyp.add_argument("--home", required=True, help="home directory")
+    ptyp.add_argument("--url", help="relay WebSocket URL (connect first)")
+
+    pcc = sub.add_parser("channel-create",
+                         help="create a project channel (an E2E group)")
+    pcc.add_argument("name", help="channel name")
+    pcc.add_argument("members", nargs="+",
+                     help="member peer ids or unique prefixes")
+    pcc.add_argument("--project", help="project id to link")
+    pcc.add_argument("--topic", default="", help="channel topic")
+    pcc.add_argument("--home", required=True, help="home directory")
+    pcc.add_argument("--url", help="relay WebSocket URL (connect first)")
+
+    pcp = sub.add_parser("channel-post",
+                         help="post a message to a channel")
+    pcp.add_argument("group_id", help="group id or unique prefix")
+    pcp.add_argument("text", nargs="+", help="message text")
+    pcp.add_argument("--reply-to", help="message id being answered")
+    pcp.add_argument("--ref", action="append", default=[],
+                     help="task id reference (repeatable)")
+    pcp.add_argument("--home", required=True, help="home directory")
+    pcp.add_argument("--url", help="relay WebSocket URL (connect first)")
+
+    pclk = sub.add_parser("channel-link",
+                          help="link a group to a project (makes it a channel)")
+    pclk.add_argument("group_id", help="group id or unique prefix")
+    pclk.add_argument("project_id", help="project id")
+    pclk.add_argument("--home", required=True, help="home directory")
+    pclk.add_argument("--url", help="relay WebSocket URL (connect first)")
     return p
 
 
@@ -1094,6 +1562,35 @@ def main(argv=None):
                               args.host, args.port)
         if args.cmd == "relay":
             return relay_home(args.home, get_passphrase(args), args.url)
+        if args.cmd == "autopilot-status":
+            # config-file read only — no passphrase needed.
+            return cmd_autopilot_status(args)
+        # Everything below opens the Connector, so it needs the passphrase.
+        passphrase = get_passphrase(args)
+        if args.cmd == "inbox":
+            return cmd_inbox(args, passphrase)
+        if args.cmd == "inbox-read":
+            return cmd_inbox_read(args, passphrase)
+        if args.cmd == "inbox-thread":
+            return cmd_inbox_thread(args, passphrase)
+        if args.cmd == "send":
+            return cmd_send(args, passphrase)
+        if args.cmd == "reply":
+            return cmd_reply(args, passphrase)
+        if args.cmd == "presence":
+            return cmd_presence(args, passphrase)
+        if args.cmd == "typing":
+            return cmd_typing(args, passphrase)
+        if args.cmd == "channel-create":
+            return cmd_channel_create(args, passphrase)
+        if args.cmd == "channel-list":
+            return cmd_channel_list(args, passphrase)
+        if args.cmd == "channel-post":
+            return cmd_channel_post(args, passphrase)
+        if args.cmd == "channel-history":
+            return cmd_channel_history(args, passphrase)
+        if args.cmd == "channel-link":
+            return cmd_channel_link(args, passphrase)
     except AcpError as e:
         print("ERROR %s: %s" % (e.code, e.detail or ""))
         return 1
