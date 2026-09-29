@@ -11,6 +11,12 @@ Behavior:
   * claims a 6-letter pairing code on every (re)connect (ttl 1h) and
     writes it to <state-dir>/pair-code.json so the owner can read it out
     for pairing:  {"code": "KX7Q2M", "claimed_at": ..., "expires_at": ...}
+  * the code is PERMANENT: on every (re)connect the daemon re-claims the
+    code recorded in pair-code.json instead of minting a fresh random one,
+    so the owner's published code never changes across restarts or
+    updates. Only if the recorded code is taken by someone else does it
+    fall back to a fresh random claim (and records that as the new
+    permanent code).
   * writes <state-dir>/relay-status.json on every state change:
     {"connected": bool, "url": ..., "since": ..., "peer_id": ...,
      "handle": ..., "code": ..., "code_expires_at": ...}
@@ -97,6 +103,27 @@ class Daemon:
 
     # ------------------------------------------------------------ state
 
+    def _active_pairings(self):
+        """Number of pairing sessions currently mid-handshake.
+
+        A session counts as active while it is neither done nor failed
+        and has not expired. The auto-updater waits for this to reach
+        zero before restarting the daemon, so an update never kills a
+        live pairing.
+        """
+        try:
+            mgr = self.conn.pairing
+        except AttributeError:
+            return 0
+        n = 0
+        for s in list(getattr(mgr, "_sessions", {}).values()):
+            try:
+                if s.state not in ("done", "failed") and not s.expired:
+                    n += 1
+            except Exception:  # noqa: BLE001
+                continue
+        return n
+
     def _status(self):
         now = int(time.time())
         with self._code_lock:
@@ -109,6 +136,7 @@ class Daemon:
             "handle": self.conn.handle if self.conn else None,
             "code": code,
             "code_expires_at": exp or None,
+            "pairing_active": self._active_pairings(),
             "fleet": self._fleet_status(),
             "now": now,
         }
@@ -144,9 +172,54 @@ class Daemon:
 
     # ---------------------------------------------------------- connect
 
+    def _preferred_code(self):
+        """The permanent pairing code, read from pair-code.json.
+
+        The relay lets a client re-claim a specific code it held before;
+        the daemon records every claimed code in pair-code.json, so the
+        next boot asks for the same one back. Returns None when no code
+        was ever recorded (first boot) or the record is unreadable.
+        """
+        try:
+            with open(os.path.join(self.args.state_dir, "pair-code.json"),
+                      encoding="utf-8") as fh:
+                code = (json.load(fh) or {}).get("code")
+        except (OSError, ValueError):
+            return None
+        if isinstance(code, str) and len(code) == 6 and code.isalnum():
+            return code.upper()
+        return None
+
+    def _claim_code(self, preferred):
+        """Claim a pairing code; fall back to random when preferred is
+        taken (or absent). Returns the claimed code or None."""
+        from acp_proto import AcpError
+        if preferred:
+            try:
+                code = self.conn.relay_claim_code(code=preferred,
+                                                 ttl=PAIR_CODE_TTL)
+                LOG.info("pairing code re-claimed (permanent): %s", code)
+                return code
+            except AcpError as e:  # noqa: BLE001
+                detail = str(getattr(e, "detail", e))
+                if "taken" in detail or "must be 6 chars" in detail:
+                    # taken by someone else, or recorded under an older
+                    # alphabet: claim a fresh one instead
+                    LOG.warning("preferred pairing code %s unusable (%s); "
+                                "claiming a fresh one", preferred, detail)
+                else:
+                    LOG.warning("pair-code claim failed (%s); continuing "
+                                "without one", e)
+                    return None
+        try:
+            return self.conn.relay_claim_code(ttl=PAIR_CODE_TTL)
+        except AcpError as e:  # noqa: BLE001
+            LOG.warning("pair-code claim failed (%s); continuing without one",
+                        e)
+            return None
+
     def _connect_once(self):
         """Connect and claim a pairing code. Raises on failure."""
-        from acp_proto import AcpError
         # relay_connect opens the wss link AND spawns the Connector's own
         # reader thread — the daemon must not pump read_loop itself.
         link = self.conn.relay_connect(self.args.url)
@@ -154,8 +227,8 @@ class Daemon:
                  self.args.url, self.conn.handle,
                  self.conn.peer_id[:12] + "...")
         try:
-            code = self.conn.relay_claim_code(ttl=PAIR_CODE_TTL)
-        except AcpError as e:
+            code = self._claim_code(self._preferred_code())
+        except Exception as e:  # noqa: BLE001 - never break the connect
             LOG.warning("pair-code claim failed (%s); continuing without one",
                         e)
             code = None
@@ -368,7 +441,12 @@ class Daemon:
                 pass
 
     def _refresh_code_if_needed(self):
-        """Re-claim the pairing code before it expires (relay-side TTL)."""
+        """Re-claim the pairing code before it expires (relay-side TTL).
+
+        Always re-claims the SAME code, so the owner's published code never
+        changes. If the code was somehow taken meanwhile, falls back to a
+        fresh claim (which then becomes the new permanent code).
+        """
         with self._code_lock:
             code, exp = self.code, self.code_expires_at
         if not code:
@@ -377,19 +455,14 @@ class Daemon:
             return
         if self.link is None or self.link.closed:
             return
-        try:
-            new_code = self.conn.relay_claim_code(ttl=PAIR_CODE_TTL)
-        except Exception as e:  # noqa: BLE001
-            LOG.warning("pair-code refresh failed: %s", e)
+        new_code = self._claim_code(code)
+        if not new_code:
             return
-        try:
-            self.conn.relay_release_code(code)
-        except Exception:  # noqa: BLE001
-            pass
         with self._code_lock:
             self.code = new_code
             self.code_expires_at = int(time.time()) + PAIR_CODE_TTL
-        LOG.info("pairing code refreshed: %s -> %s", code, new_code)
+        if new_code != code:
+            LOG.info("pairing code changed: %s -> %s", code, new_code)
         self._publish()
 
     # -------------------------------------------------------------- run
