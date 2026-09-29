@@ -20,8 +20,15 @@ Every 15 minutes the loop runs one cycle:
 3. **Update** — `git reset --hard` to the new SHA, then re-sync
    `$PREFIX/lib` from `lib_manifest.txt` (the same manifest
    `install.sh` uses, so the two can never drift apart).
-4. **Restart** — `acp-relay-daemon restart`, then wait up to 75s for the
-   daemon to come back with a live, connected relay link.
+4. **Restart (only if the daemon's own code changed)** — when the push
+   touches only docs, tests, or worker-only files, the lib is synced and
+   the daemon is left running: the relay link, the pairing code, and all
+   live sessions are untouched. When daemon code did change, the updater
+   waits for any in-flight pairing handshake to finish (up to 120s),
+   restarts the daemon — which re-claims its permanent pairing code —
+   then waits up to 75s for a live, connected relay link. Messages sent
+   during the few-second restart window queue on the relay and drain on
+   reconnect.
 5. **Roll back** — if the daemon doesn't come back healthy, the checkout
    is reset to the previous SHA, `$PREFIX/lib` is re-synced, the daemon
    restarts again, and the failure is recorded. The agent is never left
