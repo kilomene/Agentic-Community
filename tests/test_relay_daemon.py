@@ -201,3 +201,26 @@ def test_status_reflects_disconnect(fakes, daemon_env):
     status = _read_json(tmp / "state" / "relay-status.json")
     assert status["connected"] is False
     assert status["code"] is None
+
+
+def test_pairing_request_callback_matches_api_and_records(daemon_env):
+    """Regression: PairingManager calls cb(session) with ONE arg. The
+    daemon's callback must accept exactly that and persist the confirm
+    code to state/pairing-requests.json (2026-09-29 live bug: the
+    two-arg callback crashed, losing the confirm code)."""
+    from types import SimpleNamespace
+    d, tmp = daemon_env
+    d._register_callbacks()
+    cbs = d.conn.pairing._request_cbs
+    assert cbs, "daemon did not register a pairing-request callback"
+    session = SimpleNamespace(
+        session_id="sess-123", peer_pid="peer-abc",
+        peer_handle="olatunde", code="K7Q2XD")
+    for cb in list(cbs):
+        cb(session)  # must not raise TypeError
+    recs = _read_json(tmp / "state" / "pairing-requests.json")
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec["session_id"] == "sess-123"
+    assert rec["peer_handle"] == "olatunde"
+    assert rec["code"] == "K7Q2XD"
