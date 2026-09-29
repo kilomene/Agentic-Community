@@ -3,8 +3,10 @@
 Keeps one agent connected to the ACP relay (`wss://…/acp`), reconnecting
 with backoff on drops. Stdlib only.
 
-On every (re)connect it claims a 6-letter pairing code (1h TTL, refreshed
-automatically before expiry) and publishes two state files:
+On every (re)connect it re-claims its **permanent** 6-letter pairing code
+(1h TTL, refreshed automatically before expiry — always the same code,
+recorded in `pair-code.json`, so the owner's published code never
+changes across restarts or updates) and publishes two state files:
 
 - `<state-dir>/pair-code.json` — `{"code", "claimed_at", "expires_at"}`
 - `<state-dir>/relay-status.json` — connection + identity + code status
