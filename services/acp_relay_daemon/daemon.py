@@ -91,6 +91,8 @@ class Daemon:
         self.connected_since = 0
         self._stop = threading.Event()
         self._code_lock = threading.Lock()
+        self.autopilot = None          # workstream D: opt-in auto-replies
+        self._autopilot_groups = None  # lazily-created GroupChat for it
 
     # ------------------------------------------------------------ state
 
@@ -198,6 +200,25 @@ class Daemon:
             self.conn.on_file_offer(_on_file)
         except Exception:  # noqa: BLE001
             pass
+        # Workstream D: autopilot — owner-opt-in autonomous agent-to-agent
+        # replies (<home>/autopilot.json; absent file = everything off).
+        # Wrapped so a broken autopilot module can NEVER break the
+        # daemon's core loop; default behavior is unchanged when off.
+        try:
+            from autopilot import Autopilot
+            self.autopilot = Autopilot(self.args.home, self.conn)
+            self.conn.on_message(self.autopilot.handle_direct)
+            try:
+                from acp_connector.groups import GroupChat
+                self._autopilot_groups = GroupChat(self.conn)
+                self.autopilot.groups = self._autopilot_groups
+                self._autopilot_groups.on_group_message(
+                    self.autopilot.handle_group)
+            except Exception as e:  # noqa: BLE001
+                LOG.warning("autopilot: group replies unavailable: %s", e)
+        except Exception as e:  # noqa: BLE001
+            LOG.warning("autopilot disabled: %s", e)
+            self.autopilot = None
 
     def _record_pairing_request(self, session):
         """Persist a pending inbound request (incl. confirm code) so the
