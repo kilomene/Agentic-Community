@@ -294,3 +294,69 @@ def test_on_message_callback_matches_connector_signature(tmp_path):
     cb = captured["cb"]
     # Exactly how acp_connector/messaging.py invokes it:
     cb("peer-abc", "Hello, how are you doing phoenix", "e2401fa513f0")
+
+
+def test_pairing_complete_callback_fires_and_survives_raise(daemon_env):
+    """PairingManager.on_pairing_complete fires cb(peer_pid, peer_handle,
+    role); a raising callback is audited, never propagated."""
+    d, tmp = daemon_env
+    seen = []
+    d.conn.pairing.on_pairing_complete(
+        lambda pid, handle, role: seen.append((pid, handle, role)))
+
+    def boom(pid, handle, role):  # noqa: ARG001
+        raise RuntimeError("boom")
+
+    d.conn.pairing.on_pairing_complete(boom)
+    d.conn.pairing._fire_complete("peer-abc", "olatunde", "responder")
+    assert seen == [("peer-abc", "olatunde", "responder")]
+
+
+def test_fleet_auto_add_creates_group_and_adds_peer(daemon_env):
+    """With fleet auto-join enabled, a pairing completion creates the
+    fleet group on first use and adds the peer (offline-safe: sends to
+    the unreachable peer are audited, membership persists locally)."""
+    from acp_connector.groups import GroupChat
+    d, tmp = daemon_env
+    d._register_callbacks()
+    cfg = d._fleet_cfg()
+    assert cfg["auto_join"] is False  # opt-in, never on by default
+    cfg["auto_join"] = True
+    d._fleet_save(cfg)
+
+    peer_pid = "fleet-peer-" + "x" * 32
+    d.conn._store_peer(peer_pid, "agent-x", "ab" * 32, "cd" * 32)
+    # through the real completion-callback path the daemon registered
+    for cb in list(d.conn.pairing._complete_cbs):
+        cb(peer_pid, "agent-x", "responder")
+
+    groups = GroupChat(d.conn)
+    found = [g for g in groups.list_groups()
+             if g["group_id"] == d._fleet_cfg()["group_id"]]
+    assert found, "fleet group was not created"
+    members = groups.get_group(found[0]["group_id"])["members"]
+    assert d.conn.peer_id in members
+    assert peer_pid in members
+
+
+def test_fleet_auto_add_disabled_by_default(daemon_env):
+    """A pairing completion with auto-join off creates no group."""
+    d, tmp = daemon_env
+    d._register_callbacks()
+    peer_pid = "quiet-peer-" + "x" * 31
+    d.conn._store_peer(peer_pid, "agent-y", "ab" * 32, "cd" * 32)
+    for cb in list(d.conn.pairing._complete_cbs):
+        cb(peer_pid, "agent-y", "responder")
+    from acp_connector.groups import GroupChat
+    assert GroupChat(d.conn).list_groups() == []
+    assert not os.path.exists(tmp / "state" / "fleet.json") or \
+        d._fleet_cfg()["group_id"] is None
+
+
+def test_fleet_status_reports_group(daemon_env):
+    d, tmp = daemon_env
+    d._register_callbacks()
+    st = d._status()["fleet"]
+    assert st["auto_join"] is False
+    assert st["group_id"] is None
+    assert st["members"] is None
