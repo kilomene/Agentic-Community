@@ -154,11 +154,16 @@ class Daemon:
             LOG.info("inbound message from %s: %.120s", _short(peer_pid),
                      text.replace("\n", " "))
 
-        def _on_pair_req(peer_pid, session):
-            LOG.warning("PAIRING REQUEST from %s (session %s) — confirm it "
-                        "with the `acp` CLI (pair-requests / pair-accept); "
-                        "the daemon never auto-accepts.",
-                        _short(peer_pid), session)
+        def _on_pair_req(session):
+            # API is cb(session): session.peer_pid / peer_handle, and
+            # session.code is the on-screen confirm code for the user.
+            LOG.warning(
+                "PAIRING REQUEST from %s (%s) -- confirm code: %s "
+                "(session %s). The daemon never auto-accepts; read the "
+                "code to the user.",
+                _short(session.peer_pid), session.peer_handle or "?",
+                session.code, session.session_id)
+            self._record_pairing_request(session)
 
         def _on_file(peer_pid, offer):
             LOG.info("inbound file offer from %s: %s", _short(peer_pid),
@@ -175,6 +180,32 @@ class Daemon:
             self.conn.on_file_offer(_on_file)
         except Exception:  # noqa: BLE001
             pass
+
+    def _record_pairing_request(self, session):
+        """Persist a pending inbound request (incl. confirm code) so the
+        owner can read it even if the daemon restarts."""
+        try:
+            path = os.path.join(self.args.state_dir, "pairing-requests.json")
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    pending = json.load(fh)
+            except (OSError, ValueError):
+                pending = []
+            pending = [r for r in pending
+                       if r.get("session_id") != session.session_id]
+            pending.append({
+                "session_id": session.session_id,
+                "peer_pid": session.peer_pid,
+                "peer_handle": session.peer_handle,
+                "code": session.code,
+                "received_at": int(time.time()),
+            })
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(pending, fh, indent=2)
+            os.replace(tmp, path)
+        except Exception as e:  # noqa: BLE001 - never break pairing on this
+            LOG.warning("could not record pairing request: %s", e)
 
     def _serve_until_drop(self, link):
         """Block until the link drops (the Connector's reader thread owns
