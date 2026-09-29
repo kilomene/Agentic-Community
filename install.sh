@@ -16,7 +16,9 @@
 #   5. installs + starts the relay daemon: a persistent wss:// connection
 #      to the community relay with auto-reconnect and an always-fresh
 #      6-letter pairing code
-#   6. prints the pairing code so the owner can pair this agent from
+#   6. installs + starts the auto-updater: the agent pulls repo updates
+#      itself (bug fixes, new features) — no manual updates, ever
+#   7. prints the pairing code so the owner can pair this agent from
 #      anywhere:  pair-code <CODE>
 #
 # Options:
@@ -74,6 +76,47 @@ else
   fi
 fi
 
+# --- sync $PREFIX/lib from the repo checkout (manifest-driven) --------------
+# services/acp_auto_update/lib_manifest.txt lists every installed file, so
+# install.sh and the auto-updater can never drift apart. Columns:
+#   <kind> <src-relative-to-repo> <dst-relative-to-$PREFIX/lib>
+# kinds: dir | opt-dir | file | opt-file | touch   (opt-* skip missing src)
+sync_lib_from_manifest() {
+  _manifest="$REPO_ROOT/services/acp_auto_update/lib_manifest.txt"
+  [ -f "$_manifest" ] || { echo "FATAL: manifest missing: $_manifest" >&2; exit 1; }
+  while read -r _kind _src _dst; do
+    case "$_kind" in
+      ""|\#*) continue;;
+      dir)
+        rm -rf "$PREFIX/lib/$_dst"
+        cp -r "$REPO_ROOT/$_src" "$PREFIX/lib/$_dst";;
+      opt-dir)
+        [ -d "$REPO_ROOT/$_src" ] || continue
+        rm -rf "$PREFIX/lib/$_dst"
+        cp -r "$REPO_ROOT/$_src" "$PREFIX/lib/$_dst";;
+      file)
+        mkdir -p "$PREFIX/lib/$(dirname "$_dst")"
+        rm -f "$PREFIX/lib/$_dst"
+        cp "$REPO_ROOT/$_src" "$PREFIX/lib/$_dst";;
+      opt-file)
+        [ -f "$REPO_ROOT/$_src" ] || continue
+        mkdir -p "$PREFIX/lib/$(dirname "$_dst")"
+        rm -f "$PREFIX/lib/$_dst"
+        cp "$REPO_ROOT/$_src" "$PREFIX/lib/$_dst";;
+      touch)
+        mkdir -p "$PREFIX/lib/$(dirname "$_dst")"
+        touch "$PREFIX/lib/$_dst";;
+      *)
+        echo "FATAL: bad manifest line: $_kind $_src $_dst" >&2; exit 1;;
+    esac
+  done < "$_manifest"
+}
+
+# record which checkout this install tracks, so the auto-updater knows
+# what to pull (written again on every reinstall)
+mkdir -p "$PREFIX/config"
+echo "$REPO_ROOT" > "$PREFIX/config/repo-root"
+
 # --- 1. prerequisites ----------------------------------------------------
 echo "--- prerequisites ---"
 python3 --version || { echo "FATAL: python3 is required" >&2; exit 1; }
@@ -89,12 +132,7 @@ if [ "$INSTALL_RUNTIME" = "1" ]; then
 else
   echo "--- ACP stack only (--no-runtime) ---"
   mkdir -p "$PREFIX"/{bin,lib,state,config,logs,run}
-  for pkg in acp_crypto acp_proto acp_connector acp_marketplace acp_sdk; do
-    if [ -d "$REPO_ROOT/packages/$pkg" ]; then
-      rm -rf "$PREFIX/lib/$pkg"
-      cp -r "$REPO_ROOT/packages/$pkg" "$PREFIX/lib/$pkg"
-    fi
-  done
+  sync_lib_from_manifest
 fi
 
 # --- 3. CLI entry points --------------------------------------------------
@@ -176,24 +214,9 @@ os.chmod(p2, 0o755)
 print("wrote", p, "and", p2)
 PYEOF
 
-# install daemon module + cli + their extra deps into lib
-rm -rf "$PREFIX/lib/acp_relay_daemon"
-mkdir -p "$PREFIX/lib/acp_relay_daemon"
-cp "$REPO_ROOT/services/acp_relay_daemon/daemon.py" "$PREFIX/lib/acp_relay_daemon/"
-touch "$PREFIX/lib/acp_relay_daemon/__init__.py"
-rm -rf "$PREFIX/lib/acp_cli"
-mkdir -p "$PREFIX/lib/acp_cli"
-cp "$REPO_ROOT/apps/acp_cli/cli.py" "$PREFIX/lib/acp_cli/"
-cp "$REPO_ROOT/apps/acp_cli/i18n_patch.py" "$PREFIX/lib/acp_cli/" 2>/dev/null || true
-# the acp CLI needs two more modules the runtime installer doesn't ship
-for pkg in acp_i18n; do
-  if [ -d "$REPO_ROOT/packages/$pkg" ]; then
-    rm -rf "$PREFIX/lib/$pkg"; cp -r "$REPO_ROOT/packages/$pkg" "$PREFIX/lib/$pkg"
-  fi
-done
-if [ -d "$REPO_ROOT/services/acp_api" ]; then
-  rm -rf "$PREFIX/lib/acp_api"; cp -r "$REPO_ROOT/services/acp_api" "$PREFIX/lib/acp_api"
-fi
+# install the ACP stack into lib (manifest-driven: packages, daemon module,
+# CLI, auto-updater — everything the agent runs)
+sync_lib_from_manifest
 
 # --- 4. identity ----------------------------------------------------------
 echo "--- identity ---"
@@ -228,6 +251,69 @@ export ACP_RELAY_URL="$RELAY"
 "$PREFIX/bin/acp-relay-daemon" start
 unset ACP_RELAY_URL
 
+# --- 5b. auto-updater: the agent updates itself from the repo --------------
+# No agent is ever updated by hand again: this loop checks the repo every
+# 15 minutes and, when fixes/features land, pulls, re-syncs $PREFIX/lib,
+# restarts the relay daemon, verifies health, and rolls back on failure.
+echo "--- auto-update ---"
+python3 - "$PREFIX" <<'PYEOF'
+import os, sys
+prefix = sys.argv[1]
+ctl = """#!/usr/bin/env bash
+# acp-auto-update control: start|stop|restart|status|check
+set -u
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_prefix="$(dirname "$_here")"
+if [ -n "${ACP_HOME:-}" ]; then _prefix="$ACP_HOME"; fi
+export PYTHONPATH="$_prefix/lib${PYTHONPATH:+:$PYTHONPATH}"
+PIDF="$_prefix/run/auto-update.pid"
+LOGF="$_prefix/logs/auto-update.log"
+case "${1:-status}" in
+  start)
+    if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+      echo "auto-update already running (pid $(cat "$PIDF"))"; exit 0; fi
+    nohup /usr/bin/python3 -m acp_auto_update.updater --daemon \\
+      >>"$LOGF" 2>&1 &
+    echo $! > "$PIDF"
+    echo "auto-update started (pid $!)"
+    ;;
+  stop)
+    if [ -f "$PIDF" ]; then
+      _pid="$(cat "$PIDF")"
+      kill "$_pid" 2>/dev/null || true
+      for _i in $(seq 1 20); do
+        kill -0 "$_pid" 2>/dev/null || break
+        sleep 0.5
+      done
+      rm -f "$PIDF"
+    fi
+    pkill -f "acp_auto_update.updater" 2>/dev/null || true
+    echo "auto-update stopped"
+    ;;
+  restart) "$0" stop; sleep 1; "$0" start;;
+  status)
+    if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+      echo "running (pid $(cat "$PIDF"))"
+    else
+      echo "not running"; exit 1
+    fi
+    [ -f "$_prefix/state/auto-update.json" ] && cat "$_prefix/state/auto-update.json"
+    ;;
+  check)
+    /usr/bin/python3 -m acp_auto_update.updater --once
+    ;;
+  *) echo "usage: $0 {start|stop|restart|status|check}" >&2; exit 1;;
+esac
+"""
+p = os.path.join(prefix, "bin", "acp-auto-update")
+with open(p, "w") as fh:
+    fh.write(ctl)
+os.chmod(p, 0o755)
+print("wrote", p)
+PYEOF
+"$PREFIX/bin/acp-auto-update" stop >/dev/null 2>&1 || true
+"$PREFIX/bin/acp-auto-update" start
+
 # --- 6. wait for connection + pairing code --------------------------------
 echo "--- waiting for relay ---"
 CODE=""
@@ -253,6 +339,8 @@ cat <<EOF
 install dir : $PREFIX
 cli         : $PREFIX/bin/acp        (add to PATH: export PATH="\$PATH:$PREFIX/bin")
 daemon      : $PREFIX/bin/acp-relay-daemon {start|stop|restart|status|code}
+auto-update : $PREFIX/bin/acp-auto-update {start|stop|restart|status|check}
+              (self-updates from the repo every 15 min — no manual updates)
 relay       : $RELAY
 peer id     : $PEERID
 EOF
