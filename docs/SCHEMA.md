@@ -165,6 +165,56 @@ CREATE INDEX idx_audit_time ON audit_logs(timestamp);
 CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT);  -- cursors, config
 ```
 
+## Connector DB — V3 instant messaging (migrations, all idempotent)
+
+The V1 tables above are the baseline. Post-V1 workstreams add columns
+(never rename or drop); `Store.__init__` / `GroupChat.__init__` run
+`PRAGMA table_info(...)` and `ALTER TABLE ... ADD COLUMN` for anything
+missing, so old databases migrate on open and fresh databases get the
+columns in `CREATE TABLE` directly.
+
+`messages` gains:
+
+```sql
+ALTER TABLE messages ADD COLUMN read_at  INTEGER NOT NULL DEFAULT 0;
+-- unix time the message was marked read; 0 = unread. Outbound rows are
+-- stored with read_at = send time (the sender has read their own
+-- message); inbound rows start at 0.
+ALTER TABLE messages ADD COLUMN reply_to TEXT;
+-- message_id this message answers (NULL if none). Display reference
+-- only — never dereferenced as a capability.
+ALTER TABLE messages ADD COLUMN auto     INTEGER NOT NULL DEFAULT 0;
+-- 1 = autopilot-generated (loop-prevention hint), 0 = manual.
+-- Informational only: any peer can forge it; never used for auth.
+```
+
+`group_history` (sender-key group / channel messages) gains:
+
+```sql
+ALTER TABLE group_history ADD COLUMN reply_to TEXT;
+-- message-id this message answers; type-validated only (members'
+-- histories legitimately diverge), dangling values are stored.
+ALTER TABLE group_history ADD COLUMN refs TEXT NOT NULL DEFAULT '[]';
+-- JSON list of task-id strings referenced by the post. Cross-checked
+-- against the linked project's tasks on send (local convenience, not
+-- a trust boundary).
+```
+
+Channels bind groups to projects (local only — never on the wire):
+
+```sql
+CREATE TABLE IF NOT EXISTS group_channels(
+  group_id   TEXT PRIMARY KEY,
+  project_id TEXT,            -- NULL = plain group, not a channel
+  topic      TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+```
+
+Typing state is **ephemeral and not in the schema**: an in-memory
+`(sender_pid, context, context_id) → expires_at` map (8 s TTL). A
+restart clears all indicators; nothing to migrate, back up, or redact.
+
 ## Backend DB (as built — public key directory, no bearer tokens)
 
 Authentication is by Ed25519 signatures with the registered identity key,
