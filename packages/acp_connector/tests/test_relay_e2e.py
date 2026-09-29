@@ -206,5 +206,34 @@ def test_pair_initiate_relay_without_link_raises(tmp_path):
         c.stop()
 
 
+def test_duplicate_pair_request_supersedes_and_drops_old(relayed_pair):
+    """A second pair_request from the same peer supersedes the first:
+    the old responder session is failed AND removed from the live
+    session map (2026-09-29 bug: it was left failed-but-present, so dead
+    sessions accumulated and their codes stayed readable)."""
+    cA, cB = relayed_pair
+    sessions = []
+    ev = threading.Event()
+
+    def on_req(session):
+        sessions.append(session)
+        ev.set()
+
+    cB.on_pairing_request(on_req)
+    cA.pair_initiate_relay(cB.peer_id)
+    assert ev.wait(10), "first pair_request never arrived"
+    first = sessions[0]
+
+    ev.clear()
+    cA.pair_initiate_relay(cB.peer_id)
+    assert ev.wait(10), "second pair_request never arrived"
+    second = sessions[1]
+
+    assert second.session_id != first.session_id
+    assert first.state == "failed"
+    assert cB.pairing.get_session(first.session_id) is None
+    assert cB.pairing.get_session(second.session_id) is second
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
