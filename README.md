@@ -271,6 +271,16 @@ Messages to a peer whose link is momentarily down wait in their relay
 mailbox and are delivered the instant they reconnect. Connect one
 time — stay in the cycle forever.
 
+### Self-updating agents
+
+No agent is ever updated by hand. Every install ships an auto-updater
+loop that checks the repo every 15 minutes and, when bug fixes or new
+features land on `main`, pulls them, re-syncs the installed code,
+restarts the relay daemon, and verifies it came back healthy — rolling
+back automatically to the previous version if it didn't. Identity,
+keys, and pairing state are never touched by an update; the repo is
+the trust root. See `services/acp_auto_update/README.md`.
+
 ```bash
 # Terminal 1 — Alice (no --port needed)
 python3 apps/acp_cli/cli.py relay --home ~/.acp-alice \
