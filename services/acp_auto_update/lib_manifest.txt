@@ -1,0 +1,26 @@
+# lib_manifest.txt — every file the installer copies from the repo checkout
+# into $PREFIX/lib, and the auto-updater re-syncs on every update.
+#
+# Read by install.sh (bash) and services/acp_auto_update/updater.py (python).
+# Keep both readers in sync when changing this format.
+#
+# Columns: <kind> <src-relative-to-repo-root> <dst-relative-to-$PREFIX/lib>
+# kinds:
+#   dir       copy whole directory (dst is removed first)
+#   opt-dir   dir, but skip silently when src is missing
+#   file      copy one file (dst is removed first, parent dirs created)
+#   opt-file  file, but skip silently when src is missing
+#   touch     create an empty file (parent dirs created; src column is '-')
+
+dir       packages/acp_crypto                  acp_crypto
+dir       packages/acp_proto                   acp_proto
+dir       packages/acp_connector                acp_connector
+dir       packages/acp_marketplace              acp_marketplace
+dir       packages/acp_sdk                     acp_sdk
+dir       packages/acp_i18n                     acp_i18n
+dir       services/acp_auto_update              acp_auto_update
+opt-dir   services/acp_api                     acp_api
+file      services/acp_relay_daemon/daemon.py   acp_relay_daemon/daemon.py
+touch     -                                       acp_relay_daemon/__init__.py
+file      apps/acp_cli/cli.py                   acp_cli/cli.py
+opt-file  apps/acp_cli/i18n_patch.py            acp_cli/i18n_patch.py
