@@ -57,6 +57,10 @@ class Connector:
         os.makedirs(self.incoming_dir, exist_ok=True)
         self._passphrase = passphrase
 
+        # V2+ extension dispatch table must exist before any component
+        # (e.g. Presence) registers a kind handler in its constructor.
+        self._ext_handlers = {}  # V2+ kind -> fn(conn, env, payload)
+
         self.store = Store(os.path.join(self.home, "connector.db"))
         self.audit = Audit(self.home, self.store)
         self.identity = Identity(self.home, passphrase, handle)
@@ -85,7 +89,6 @@ class Connector:
         self._relay_link = None  # RelayLink to a wss:// relay (shared)
         self._relay_queued = []  # [(to_pid, mailbox_id, ts)] FIFO notices
         self._relay_queued_lock = threading.Lock()
-        self._ext_handlers = {}  # V2+ kind -> fn(conn, env, payload)
         self._replay = collections.OrderedDict()
         self._replay_lock = threading.Lock()
         self._prev_x_priv = None  # pre-rotation X25519 key (decrypt fallback)
@@ -526,11 +529,38 @@ class Connector:
         self.pairing.on_pairing_request(cb)
 
     # --------------------------------------------------------------- messaging
-    def send_message(self, peer_pid, text):
-        return self.messaging.send_message(peer_pid, text)
+    def send_message(self, peer_pid, text, *, reply_to=None, auto=False):
+        return self.messaging.send_message(peer_pid, text,
+                                           reply_to=reply_to, auto=auto)
+
+    def send_reply(self, peer_pid, reply_to_msg_id, text):
+        """Send a threaded reply (E2E MSG with reply_to set)."""
+        return self.messaging.send_reply(peer_pid, reply_to_msg_id, text)
 
     def on_message(self, cb):
         self.messaging.on_message(cb)
+
+    # ------------------------------------------------------------------ inbox
+    def inbox(self, limit=50, unread_only=False, peer_pid=None):
+        """Newest-first inbox rows (dicts with read_at/reply_to/auto)."""
+        return self.store.list_inbox(limit=limit, unread_only=unread_only,
+                                     peer_pid=peer_pid)
+
+    def get_message(self, message_id):
+        return self.store.get_message(message_id)
+
+    def mark_read(self, message_id):
+        return self.store.mark_read(message_id)
+
+    def mark_unread(self, message_id):
+        return self.store.mark_unread(message_id)
+
+    def get_thread(self, message_id):
+        """Oldest-first thread (root + all descendants) for a message."""
+        return self.store.get_thread(message_id)
+
+    def unread_count(self):
+        return self.store.unread_count()
 
     # ------------------------------------------------------------------- files
     def send_file(self, peer_pid, path):
@@ -600,6 +630,34 @@ class Connector:
 
     def list_presence(self):
         return self.presence.list()
+
+    def typing_start(self, peer_pid):
+        return self.presence.typing_start(peer_pid)
+
+    def typing_stop(self, peer_pid):
+        return self.presence.typing_stop(peer_pid)
+
+    def typing_start_group(self, group_id):
+        return self.presence.typing_start_group(group_id)
+
+    def typing_stop_group(self, group_id):
+        return self.presence.typing_stop_group(group_id)
+
+    def is_typing(self, peer_pid):
+        return self.presence.is_typing(peer_pid)
+
+    def typing_in_group(self, group_id):
+        return self.presence.typing_in_group(group_id)
+
+    @property
+    def groups(self):
+        """Lazily-created GroupChat: group chats and project channels."""
+        gc = self.__dict__.get("_groups")
+        if gc is None:
+            from .groups import GroupChat
+            gc = GroupChat(self)
+            self.__dict__["_groups"] = gc
+        return gc
 
     # ------------------------------------------------------------------- keys
     def rotate_keys(self):
