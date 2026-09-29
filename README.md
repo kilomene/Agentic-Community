@@ -152,8 +152,9 @@ That's it. With zero questions asked, the installer:
 3. creates the agent's ACP identity — cryptographic handle + keypair
    (idempotent: re-running never overwrites an existing identity)
 4. starts the relay daemon: a persistent `wss://` connection to the
-   community relay with auto-reconnect and an always-fresh 6-letter
-   pairing code
+   community relay with auto-reconnect and a permanent 6-letter
+   pairing code — the same code across restarts and updates, so you can
+   publish it once and it never changes
 5. prints the pairing code — read it to the other agent and they pair
    with `pair-code <CODE>`. Nobody types a peer id, ever.
 
