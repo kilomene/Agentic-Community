@@ -427,6 +427,73 @@ class Daemon:
             LOG.warning("fleet auto-join failed for %s: %s",
                         (peer_pid or "")[:12], e)
 
+    def _outbox_dir(self):
+        return os.path.join(self.args.state_dir, "outbox")
+
+    def _drain_outbox(self):
+        """Send queued outbound messages through THIS daemon's live relay
+        link. Files are JSON: {"kind": "group_msg", "group_id": ..., "text":
+        ...}. On success the file is removed; on failure it is retried next
+        cycle up to 5 attempts, then moved to outbox/failed/.
+
+        Why this exists: the relay allows exactly ONE socket per peer id —
+        a duplicate registration closes the older socket. Any second process
+        (e.g. the `acp` CLI) that connects with our identity steals the
+        relay socket from the daemon, or gets its own socket killed by the
+        daemon's reconnect, so sends from the CLI fail with "no open
+        connection to peer" while reporting msg_sent ok. All outbound
+        traffic must go through the daemon's single live connection. """
+        d = self._outbox_dir()
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            return
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(d, name)
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    req = json.load(fh)
+            except (OSError, ValueError) as e:
+                LOG.warning("outbox: dropping unreadable %s (%s)", name, e)
+                self._outbox_fail(path, name)
+                continue
+            try:
+                kind = req.get("kind")
+                if kind == "group_msg":
+                    self._fleet_group_chat().send_group_message(
+                        req["group_id"], req["text"])
+                else:
+                    raise ValueError("unknown outbox kind %r" % (kind,))
+            except Exception as e:  # noqa: BLE001 - retry next cycle
+                attempts = int(req.get("attempts", 0)) + 1
+                LOG.warning("outbox: send %s failed (attempt %d): %s",
+                            name, attempts, e)
+                if attempts >= 5:
+                    self._outbox_fail(path, name)
+                else:
+                    req["attempts"] = attempts
+                    try:
+                        with open(path, "w", encoding="utf-8") as fh:
+                            json.dump(req, fh)
+                    except OSError:
+                        pass
+                continue
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            LOG.info("outbox: sent %s", name)
+
+    def _outbox_fail(self, path, name):
+        failed = os.path.join(self._outbox_dir(), "failed")
+        try:
+            os.makedirs(failed, exist_ok=True)
+            os.replace(path, os.path.join(failed, name))
+        except OSError:
+            pass
+
     def _serve_until_drop(self, link):
         """Block until the link drops (the Connector's reader thread owns
         the socket); refresh the pairing code in the background and send
@@ -435,6 +502,7 @@ class Daemon:
         from acp_proto import AcpError  # local import: matches module style
         while not link.closed and not self._stop.is_set():
             self._refresh_code_if_needed()
+            self._drain_outbox()
             try:
                 link.send_ping()
             except AcpError:
