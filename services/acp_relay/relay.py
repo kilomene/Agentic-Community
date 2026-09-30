@@ -216,12 +216,13 @@ class RelayHandler(socketserver.BaseRequestHandler):
         drain_ev = self.server.begin_drain(pid)
         try:
             self.drain_mailbox(pid)
-            # A frame for this pid may have been stored between our
-            # first drain check and now (dispatch raced our hello
-            # verification); sweep once more so it is delivered on
-            # this connection instead of sitting queued until the
-            # next reconnect.
-            self.drain_mailbox(pid)
+            # A frame for this pid may have been stored while our first
+            # drain was running (dispatch raced our hello verification);
+            # sweep once more so it is delivered on this connection
+            # instead of sitting queued until the next reconnect. The
+            # second sweep skips the inflight reset so already-sent rows
+            # are never delivered twice.
+            self.drain_mailbox(pid, _reset=False)
         finally:
             self.server.end_drain(pid, drain_ev)
         try:
@@ -236,16 +237,22 @@ class RelayHandler(socketserver.BaseRequestHandler):
         finally:
             self.server.unregister(pid, self.request)
 
-    def drain_mailbox(self, pid):
+    def drain_mailbox(self, pid, _reset=True):
         """Send queued frames FIFO, before any new traffic. Frames stay
-        inflight until the client acks them."""
+        inflight until the client acks them.
+
+        _reset=False skips the inflight reset: only genuinely new
+        ('queued') rows are picked up, so a second sweep never
+        re-sends rows the first sweep already delivered.
+        """
         mb = self.server.mailbox
         if mb is None:
-            return
-        mb.reset_inflight(pid)
+            return 0
+        if _reset:
+            mb.reset_inflight(pid)
         rows = mb.pending(pid)
         if not rows:
-            return
+            return 0
         ids = [r["id"] for r in rows]
         mb.mark_inflight(ids)
         try:
@@ -255,9 +262,10 @@ class RelayHandler(socketserver.BaseRequestHandler):
         except OSError:
             # Socket died mid-drain; frames stay inflight and are
             # retried on the next reconnect.
-            return
+            return 0
         self.server.audit("mailbox.drained",
                           {"pid": pid[:16], "frames": len(rows)})
+        return len(rows)
 
     def dispatch(self, raw):
         try:

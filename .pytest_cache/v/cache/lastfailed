@@ -1,4 +1,16 @@
 {
-  "tests/test_federation.py::FederationTests::test_link_failure_degrades_gracefully": true,
-  "tests/test_sdk.py::test_sdk_directory_register_and_search": true
+  "tests/test_backend.py::ApiDirectoryTests::test_healthz": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_presence_bad_sig_401": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_presence_bad_state_400": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_presence_set_and_get": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_presence_stale_ts_401": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_presence_unknown_handle_404": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_presence_update_state": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_register_and_resolve": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_register_bad_handle_400": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_register_bad_key_400": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_register_duplicate_409": true,
+  "tests/test_backend.py::ApiDirectoryTests::test_resolve_unknown_404": true,
+  "tests/test_fleet_board.py::test_task_render_records_board_entry": true,
+  "tests/test_relay_daemon.py::test_serve_sends_keepalive_pings": true
 }
