@@ -273,6 +273,7 @@
   "tests/test_marketplace.py::test_tampered_byte_install_refused",
   "tests/test_office.py::test_auth_required",
   "tests/test_office.py::test_chat_filtered_and_named",
+  "tests/test_office.py::test_chat_post_is_read_only",
   "tests/test_office.py::test_chat_post_queues_message",
   "tests/test_office.py::test_chat_post_validation",
   "tests/test_office.py::test_chat_post_wrong_method_rejected",

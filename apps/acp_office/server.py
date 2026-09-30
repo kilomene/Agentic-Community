@@ -120,9 +120,28 @@ class Office:
         self.token = token or secrets.token_urlsafe(32)
         self.host = host
         self.port = port
+        self.self_id = self._self_id()
+        self.self_name = os.environ.get("ACP_OFFICE_SELF_NAME", "Phoenix")
         self._lock = threading.RLock()
         self._httpd = None
         self._thread = None
+
+    def _self_id(self):
+        """This daemon's own peer id, so its chat messages get a name.
+
+        Env ACP_OFFICE_SELF_ID wins; otherwise read relay-status.json next
+        to the state dir. None when unavailable.
+        """
+        sid = os.environ.get("ACP_OFFICE_SELF_ID")
+        if sid:
+            return sid
+        try:
+            with open(os.path.join(os.path.dirname(self.paths["board_db"]),
+                                   "relay-status.json"),
+                      "r", encoding="utf-8") as fh:
+                return json.load(fh).get("peer_id")
+        except (OSError, ValueError, AttributeError):
+            return None
 
     # ------------------------------------------------------------- sources
     def _group_id_from_fleet_json(self):
@@ -295,15 +314,41 @@ class Office:
 
     # --------------------------------------------------------------- data
     def _sender_names(self, db):
-        """agent_id -> display_name from trusted_agents (revoked excluded)."""
+        """Map any sender id string to the nicest display name available.
+
+        Chain: trusted_agents agent_id -> display_name; roster file
+        (handle and agent_id -> display_name); cross-link so a trusted
+        display name that is really a handle (e.g. "agent-746f") resolves
+        to the roster's nicer name ("Tobi"); this daemon's own peer id ->
+        self_name ("Phoenix").
+        """
         names = {}
+        roster = self._read_roster_file()
+        roster_by_aid = {}
+        for handle, entry in roster.items():
+            dn = entry.get("display_name") or handle
+            names.setdefault(handle, dn)
+            aid = entry.get("agent_id")
+            if aid:
+                roster_by_aid[aid] = dn
+                names.setdefault(aid, dn)
         try:
-            for r in db.execute(
-                    "SELECT agent_id, display_name FROM trusted_agents"
-                    " WHERE revoked=0"):
-                names[r["agent_id"]] = r["display_name"] or r["agent_id"]
+            trusted = db.execute(
+                "SELECT agent_id, display_name FROM trusted_agents"
+                " WHERE revoked=0").fetchall()
         except sqlite3.Error:
-            pass
+            trusted = []
+        for r in trusted:
+            # The roster is the owner's curated list: its display name
+            # wins over a handle-like trusted_agents name ("agent-746f").
+            names[r["agent_id"]] = (roster_by_aid.get(r["agent_id"])
+                                    or r["display_name"] or r["agent_id"])
+        for r in trusted:
+            dn = roster_by_aid.get(r["agent_id"])
+            if dn and r["display_name"]:
+                names[r["display_name"]] = dn
+        if self.self_id:
+            names[self.self_id] = self.self_name
         return names
 
     # -------------------------------------------------------------- API
@@ -492,7 +537,7 @@ class Office:
                          "last_seen": None})
                     a["last_seen"] = r["updated_at"]
             db.close()
-        roster = self._read_roster_agents()
+        roster = self._read_roster_file()
         for handle, entry in roster.items():
             aid = entry.get("agent_id")
             if aid and aid in agents:
@@ -522,10 +567,10 @@ class Office:
                                 x["age_s"] if x["age_s"] is not None else 1e18))
         self._json(req, {"ok": True, "agents": out})
 
-    def _read_roster_agents(self):
-        """fleet.json roster agents, if the file carries an agents map."""
+    def _read_roster_file(self):
+        """fleet-roster.json agents map (handle -> entry)."""
         try:
-            with open(self.paths["fleet_json"], "r",
+            with open(self.paths["roster_json"], "r",
                       encoding="utf-8") as fh:
                 data = json.load(fh)
         except (OSError, ValueError):
@@ -560,41 +605,12 @@ class Office:
         self._json(req, {"ok": True, "agents": agents})
 
     def api_chat_post(self, req, query):
-        """Queue a fleet message via the daemon outbox (drained by the
-        relay daemon through its own live connection)."""
-        body, err = self._read_json_body(req)
-        if err:
-            self._json(req, {"ok": False, "code": "BAD_REQUEST",
-                             "detail": err}, 400)
-            return
-        text = body.get("text") if isinstance(body, dict) else None
-        if not isinstance(text, str) or not text.strip():
-            self._json(req, {"ok": False, "code": "BAD_REQUEST",
-                             "detail": "text is required"}, 400)
-            return
-        text = text.strip()
-        if len(text) > 2000:
-            self._json(req, {"ok": False, "code": "BAD_REQUEST",
-                             "detail": "text too long (max 2000 chars)"},
-                       400)
-            return
-        outbox = self.paths["outbox_dir"]
-        try:
-            os.makedirs(outbox, exist_ok=True)
-        except OSError:
-            self._json(req, {"ok": False, "code": "INTERNAL",
-                             "detail": "outbox unavailable"}, 500)
-            return
-        fname = "%s-%s.json" % (time.strftime("%Y%m%d%H%M%S"),
-                                secrets.token_hex(4))
-        payload = {"kind": "group_msg", "group_id": self.group_id,
-                   "text": text}
-        try:
-            with open(os.path.join(outbox, fname), "w",
-                      encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False)
-        except OSError:
-            self._json(req, {"ok": False, "code": "INTERNAL",
-                             "detail": "queue failed"}, 500)
-            return
-        self._json(req, {"ok": True, "queued": True})
+        """Read-only by owner order (2026-09-30): the website never sends.
+
+        Fleet messages pass through Phoenix in the main chat; the office
+        page is the owner's private live view, with no outbound path.
+        """
+        self._json(req, {"ok": False, "code": "READ_ONLY",
+                         "detail": "website is read-only: fleet messages go"
+                                   " through Phoenix in the main chat"},
+                   403)

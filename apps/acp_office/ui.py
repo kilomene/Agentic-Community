@@ -135,13 +135,6 @@ body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
 .msg.new .bubble{animation:flash 1.8s}
 #newPill{display:none;position:sticky;bottom:10px;margin:0 auto;background:var(--acc);color:#181206;
   font-size:12px;font-weight:700;border:none;border-radius:16px;padding:7px 16px;cursor:pointer;z-index:5}
-#composer{display:flex;gap:8px;padding:12px 0 2px}
-#composerInput{flex:1;background:var(--panel);border:1px solid var(--line2);border-radius:10px;
-  color:var(--text);padding:11px 14px;font-size:14px;font-family:inherit;resize:none;height:44px}
-#composerInput:focus{outline:none;border-color:var(--acc)}
-#sendBtn{background:var(--acc);border:none;color:#181206;font-weight:800;border-radius:10px;
-  padding:0 22px;font-size:14px;cursor:pointer}
-#sendBtn:disabled{opacity:.5;cursor:default}
 /* ---------- kanban ---------- */
 .kanban{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:12px;align-items:start}
 .kcol{background:var(--bg);border:1px solid var(--line);border-radius:var(--r);padding:10px;min-height:120px}
@@ -229,10 +222,7 @@ body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
       <section id="view-chat" class="view">
         <div id="chatList"></div>
         <button id="newPill"></button>
-        <div id="composer">
-          <textarea id="composerInput" placeholder="Message the fleet&hellip; (Enter to send)"></textarea>
-          <button id="sendBtn">Send</button>
-        </div>
+        <div class="dim" style="padding:12px 2px;font-size:12px">Read-only &mdash; fleet messages go through Phoenix in the main chat.</div>
       </section>
       <section id="view-tasks" class="view"></section>
       <section id="view-activity" class="view"></section>
@@ -278,6 +268,7 @@ function fmtDay(ts){
 }
 function ago(ts){
   if (ts == null) return 'never';
+  if (typeof ts !== 'number' || isNaN(ts)) return '\\u2014';
   var s = Math.floor(Date.now() / 1000 - ts);
   if (s < 0) s = 0;
   if (s < 10) return 'just now';
@@ -629,38 +620,9 @@ function renderChat(forceBottom){
     if (atB){ $('#newPill').style.display = 'none'; S.unread = 0; updateBadge(); }
   };
 }
-function sendChat(){
-  var inp = $('#composerInput');
-  var text = inp.value.trim();
-  if (!text || S.sending) return;
-  S.sending = true;
-  $('#sendBtn').disabled = true;
-  fetch('/api/chat', {
-    method: 'POST',
-    headers: {'X-Office-Token': S.token, 'Content-Type': 'application/json'},
-    body: JSON.stringify({text: text})
-  }).then(function(r){
-    if (r.status === 401) throw {unauth: true};
-    if (!r.ok) throw new Error('http ' + r.status);
-    return r.json();
-  }).then(function(){
-    inp.value = '';
-    /* optimistic echo until the relay round-trips it back */
-    var m = {id: 'local-' + Date.now(), sender_name: 'You', text: text,
-             created_at: Math.floor(Date.now() / 1000), local: true};
-    S.chat.push(m); S.chatIds[m.id] = 1; S._chatFresh = [m];
-    renderChat(true);
-    toast('Sent — the daemon relays it to the fleet');
-    setTimeout(poll, 2500);
-  }).catch(function(e){
-    if (e && e.unauth) authFail();
-    else toast('Send failed: ' + (e.message || e), true);
-  }).finally(function(){
-    S.sending = false;
-    $('#sendBtn').disabled = false;
-    inp.focus();
-  });
-}
+/* Chat is read-only by design: fleet messages pass through Phoenix in the
+   main chat, never through this page. */
+/* (sendChat removed 2026-09-30 per owner's order) */
 /* ============================== tasks ============================== */
 var KANBAN = [
   {key: 'queue', label: 'Queue', states: ['open', 'assigned', 'acked', 'blocked']},
@@ -735,7 +697,7 @@ function renderAgents(){
         esc(a.display_name.charAt(0).toUpperCase()) + '</span>' +
       '<span class="dot ' + a.state + '"></span>' +
       '<div><div class="nm">' + esc(a.display_name) + '</div>' +
-      '<div class="sub">' + esc(a.handle || '') + (a.agent_id ? ' &middot; ' + esc(a.agent_id.slice(0, 10)) + '&hellip;' : '') + '</div></div>' +
+      '<div class="sub">' + esc([a.handle, a.agent_id ? a.agent_id.slice(0, 10) + '\\u2026' : ''].filter(Boolean).join(' \\u00b7 ')) + '</div></div>' +
       '<div class="right">' + esc(a.state) + '<br><span data-ago="' + (a.last_seen || '') + '">' + ago(a.last_seen) + '</span></div>' +
       '</div>';
     if (a.note) h += '<div class="dim" style="margin-top:8px">' + esc(a.note) + '</div>';
@@ -777,10 +739,6 @@ $('#menuBtn').addEventListener('click', function(){
 $('#scrim').addEventListener('click', function(){
   $('#sidebar').classList.remove('open');
   $('#scrim').classList.remove('on');
-});
-$('#sendBtn').addEventListener('click', sendChat);
-$('#composerInput').addEventListener('keydown', function(e){
-  if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendChat(); }
 });
 $('#newPill').addEventListener('click', function(){
   var box = $('#chatList');

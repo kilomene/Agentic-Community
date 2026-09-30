@@ -152,7 +152,9 @@ def empty_server(tmp_path):
     paths = {"connector_db": os.path.join(d, "nope1.db"),
              "board_db": os.path.join(d, "nope2.db"),
              "ledger_db": os.path.join(d, "nope3.db"),
-             "fleet_json": os.path.join(d, "nope.json")}
+             "fleet_json": os.path.join(d, "nope.json"),
+             "roster_json": os.path.join(d, "nope-roster.json"),
+             "outbox_dir": os.path.join(d, "nope-outbox")}
     office = office_mod.Office(paths=paths, group_id=GROUP,
                                token=TEST_TOKEN, port=0)
     port = office.start()
@@ -309,6 +311,8 @@ def test_missing_tables_graceful(tmp_path):
             "CREATE TABLE junk(x TEXT)").close()
         paths[key] = p
     paths["fleet_json"] = os.path.join(d, "fleet.json")
+    paths["roster_json"] = os.path.join(d, "roster.json")
+    paths["outbox_dir"] = os.path.join(d, "outbox")
     office = office_mod.Office(paths=paths, group_id=GROUP,
                                token=TEST_TOKEN, port=0)
     port = office.start()
@@ -412,35 +416,15 @@ def test_roster_missing_graceful(server):
     assert isinstance(data["agents"], list)
 
 
-def test_chat_post_queues_message(office_with_roster_and_outbox):
+def test_chat_post_is_read_only(office_with_roster_and_outbox):
+    # Owner order 2026-09-30: the website never sends. POST always 403s,
+    # writes nothing to the outbox, and auth still applies.
     _, port, outbox_dir = office_with_roster_and_outbox
-    status, data = _post(port, "/api/chat", {"text": "hello fleet"})
-    assert status == 200
-    assert data == {"ok": True, "queued": True}
-    files = os.listdir(outbox_dir)
-    assert len(files) == 1
-    with open(os.path.join(outbox_dir, files[0]),
-              encoding="utf-8") as fh:
-        payload = json.load(fh)
-    assert payload == {"kind": "group_msg", "group_id": GROUP,
-                       "text": "hello fleet"}
-
-
-def test_chat_post_validation(office_with_roster_and_outbox):
-    _, port, outbox_dir = office_with_roster_and_outbox
-
-    def expect_400(payload=None, raw=None):
-        with pytest.raises(urllib.error.HTTPError) as exc:
-            _post(port, "/api/chat", payload, raw=raw)
-        assert exc.value.code == 400
-
-    expect_400({"text": "   "})          # blank
-    expect_400({})                       # missing
-    expect_400({"text": "x" * 2001})     # too long
-    expect_400(raw=b"{not json")         # malformed
-    expect_400(raw=b"")                  # empty body
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post(port, "/api/chat", {"text": "hello fleet"})
+    assert exc.value.code == 403
     queued = os.listdir(outbox_dir) if os.path.isdir(outbox_dir) else []
-    assert queued == []  # nothing queued
+    assert queued == []
 
     with pytest.raises(urllib.error.HTTPError) as exc:  # no token
         _post(port, "/api/chat", {"text": "hi"}, token=None)
@@ -459,3 +443,52 @@ def test_chat_post_wrong_method_rejected(server):
     with pytest.raises(urllib.error.HTTPError) as exc:
         urllib.request.urlopen(req, timeout=10)
     assert exc.value.code == 405
+
+    def test_sender_name_chain_prefers_roster_and_self(self):
+        """trusted handle-like names cross-link to roster names; own peer id -> Phoenix."""
+        srv = self._srv()
+        # roster file with a nicer display name
+        roster = {"agents": {"tobi": {"display_name": "Tobi",
+                                      "agent_id": "oQIV0ZhUtwapqytgxtsAvjQyoVmJljxeJad6HK59IMb"}}}
+        with open(self._p("roster_json"), "w", encoding="utf-8") as fh:
+            json.dump(roster, fh)
+        # trusted_agents: peer id -> handle-like display name
+        db = sqlite3.connect(self._p("connector_db"))
+        db.execute("CREATE TABLE trusted_agents (agent_id TEXT, display_name TEXT, revoked INT)")
+        db.execute("INSERT INTO trusted_agents VALUES (?,?,0)",
+                   ("oQIV0ZhUtwapqytgxtsAvjQyoVmJljxeJad6HK59IMb", "agent-746f"))
+        db.execute("""CREATE TABLE group_history
+                      (message_id TEXT, group_id TEXT, sender_id TEXT,
+                       text TEXT, ts INT, created_at INT, reply_to TEXT)""")
+        db.execute("INSERT INTO group_history VALUES (?,?,?,?,?,?,?)",
+                   ("gm-1", self.GROUP, "agent-746f", "hello", 1, 1, None))
+        db.execute("INSERT INTO group_history VALUES (?,?,?,?,?,?,?)",
+                   ("gm-2", self.GROUP, "bEaZBMI0dpj1J6lT0mF7dm38oy7znzxCP0DKWG9jrOg",
+                    "roll call", 2, 2, None))
+        db.execute("INSERT INTO group_history VALUES (?,?,?,?,?,?,?)",
+                   ("gm-3", self.GROUP,
+                    "oQIV0ZhUtwapqytgxtsAvjQyoVmJljxeJad6HK59IMb",
+                    "long id", 3, 3, None))
+        db.commit()
+        db.close()
+        # fake relay-status.json carrying the daemon's own peer id
+        with open(os.path.join(self.state, "relay-status.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"peer_id": "bEaZBMI0dpj1J6lT0mF7dm38oy7znzxCP0DKWG9jrOg"}, fh)
+        srv = self._srv()
+        got = self._get(srv, "/api/chat?limit=10")["messages"]
+        names = {m["id"]: m["sender_name"] for m in got}
+        self.assertEqual(names["gm-1"], "Tobi")
+        self.assertEqual(names["gm-2"], "Phoenix")
+        self.assertEqual(names["gm-3"], "Tobi")
+
+    def test_ago_guards_nan(self):
+        """The JS ago() helper never renders NaN for bad timestamps."""
+        import re
+        src = open(os.path.join(os.path.dirname(__file__), "..",
+                                "apps", "acp_office", "ui.py"),
+                   encoding="utf-8").read()
+        m = re.search(r"function ago\(ts\)\{(.*?)\n\}", src, re.S)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("isNaN", body)
