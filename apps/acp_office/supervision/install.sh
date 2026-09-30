@@ -85,7 +85,16 @@ APP_MAIN="$APP_MAIN"
 PORT="$PORT"
 PYTHON="$PYTHON"
 
-alive() { [ -f "\$PID_FILE" ] && kill -0 "\$(cat "\$PID_FILE" 2>/dev/null)" 2>/dev/null; }
+# alive: pidfile must exist AND the pid must be a live process whose
+# command line is the office server (guards stale pidfiles / pid reuse).
+alive() {
+  local p
+  [ -f "\$PID_FILE" ] || return 1
+  p="\$(cat "\$PID_FILE" 2>/dev/null)"
+  case "\$p" in ''|*[!0-9]*) return 1;; esac
+  [ -r "/proc/\$p/cmdline" ] || return 1
+  tr '\0' ' ' < "/proc/\$p/cmdline" | grep -q "acp_office/__main__[.]py"
+}
 
 case "\${1:-}" in
   start)
