@@ -23,6 +23,10 @@ opt-dir   services/acp_api                     acp_api
 file      services/acp_relay_daemon/daemon.py   acp_relay_daemon/daemon.py
 file      services/acp_relay_daemon/autopilot.py autopilot.py
 file      services/acp_relay_daemon/fleet_ops.py fleet_ops.py
+file      services/acp_relay_daemon/wake.py      wake.py
+file      services/acp_relay_daemon/enrollment.py enrollment.py
+file      services/acp_relay_daemon/work_ledger.py work_ledger.py
+file      services/acp_relay_daemon/fleet_board.py fleet_board.py
 dir       services/acp_relay_daemon/autopilot_hooks autopilot_hooks
 touch     -                                       acp_relay_daemon/__init__.py
 file      apps/acp_cli/cli.py                   acp_cli/cli.py

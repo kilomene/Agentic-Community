@@ -499,6 +499,122 @@ def cmd_channel_link(args, passphrase):
         conn.stop()
 
 
+def _market_meta(source_dir, args):
+    """Package metadata: --flags win, else market.json in the source dir."""
+    meta = {}
+    mj = os.path.join(source_dir, "market.json")
+    if os.path.isfile(mj):
+        try:
+            with open(mj) as f:
+                meta = json.load(f) or {}
+        except (OSError, ValueError) as e:
+            raise AcpError("BAD_ENVELOPE",
+                           "unreadable market.json: %s" % e)
+        if not isinstance(meta, dict):
+            raise AcpError("BAD_ENVELOPE", "market.json is not an object")
+    name = args.name or meta.get("name")
+    version = args.version or meta.get("version")
+    if not name:
+        raise AcpError("INTERNAL",
+                       "package name required: --name or market.json")
+    if not version:
+        raise AcpError("INTERNAL",
+                       "package version required: --version or market.json")
+    desc = args.desc if args.desc is not None else meta.get("description",
+                                                            "")
+    caps_raw = args.caps if args.caps is not None else meta.get(
+        "capabilities", "")
+    if isinstance(caps_raw, str):
+        caps = [c.strip() for c in caps_raw.split(",") if c.strip()]
+    else:
+        caps = list(caps_raw or [])
+    entry = args.entry or meta.get("entry_point")
+    if not entry:
+        raise AcpError("INTERNAL",
+                       "entry point required: --entry or market.json")
+    return name, version, desc, caps, entry
+
+
+def cmd_market(args, passphrase):
+    conn = _open(args.home, passphrase)
+    try:
+        _maybe_relay(conn, getattr(args, "url", None))
+        from acp_marketplace import Marketplace
+        m = Marketplace(conn)
+        sub = args.market_cmd
+        if sub == "publish":
+            return cmd_market_publish(m, args)
+        if sub == "install":
+            return cmd_market_install(conn, m, args)
+        if sub == "search":
+            return cmd_market_search(m, args)
+        if sub == "installed":
+            return cmd_market_installed(m)
+        raise AcpError("INTERNAL", "unknown market subcommand %r" % sub)
+    finally:
+        conn.stop()
+
+
+def cmd_market_publish(m, args):
+    src = os.path.abspath(args.source_dir)
+    if not os.path.isdir(src):
+        raise AcpError("INTERNAL", "not a directory: %s" % src)
+    name, version, desc, caps, entry = _market_meta(src, args)
+    manifest = m.publish_package(src, name, version, desc, caps, entry)
+    print("published %s %s" % (manifest["name"], manifest["version"]))
+    print("  publisher: %s" % manifest["publisher_id"])
+    print("  entry:     %s" % manifest["entry_point"])
+    print("  files:     %d" % len(manifest["files"]))
+    print("  sig:       %s..." % manifest["sig"][:16])
+    print("  store:     <home>/marketplace/packages/%s-%s/"
+          % (manifest["name"], manifest["version"]))
+    return 0
+
+
+def cmd_market_install(conn, m, args):
+    peer = resolve_pid(conn, args.peer) if args.peer else None
+    # Typing the command IS the explicit local approval: the API-level
+    # 'manual' policy gate (install_package without approve=) still
+    # refuses programmatic installs.
+    receipt = m.install_package(args.name, version=args.version,
+                                from_peer=peer, approve=True)
+    print("verified signature: publisher %s"
+          % _short(receipt["publisher_id"]))
+    print("installed %s %s (%d files)" % (receipt["name"],
+                                          receipt["version"],
+                                          receipt["files"]))
+    print("  -> %s" % receipt["installed"])
+    print("  (files only; package code was NOT executed)")
+    return 0
+
+
+def cmd_market_search(m, args):
+    listings, _ = m.list_packages(query=args.query,
+                                   capability=args.cap, limit=100)
+    if not listings:
+        print("(no packages match)")
+        return 0
+    for r in listings:
+        caps = ",".join(r.get("capabilities", []))
+        print("%s  %s  %s  [%s]  by %s" % (
+            r.get("name"), r.get("version"),
+            (r.get("description") or "")[:60], caps,
+            _short(r.get("publisher_id", ""))))
+    return 0
+
+
+def cmd_market_installed(m):
+    rows = m.store.list_installs()
+    if not rows:
+        print("(no packages installed)")
+        return 0
+    for r in rows:
+        print("%s  %s  by %s  -> %s" % (
+            r.get("name"), r.get("version"),
+            _short(r.get("publisher_id", "")), r.get("path")))
+    return 0
+
+
 def cmd_autopilot_status(args):
     path = os.path.join(os.path.abspath(args.home), "autopilot.json")
     if not os.path.isfile(path):
@@ -1309,11 +1425,46 @@ class AcpShell(cmd.Cmd):
     # ------------------------------------------------------------ marketplace
     @guard
     def do_market_publish(self, arg):
-        """market-publish <dir> <name> <version> — sign and publish."""
-        argv = self._argv(arg, 3, "market-publish <dir> <name> <version>")
-        pkg_id = self._market().publish_package(argv[0], argv[1], argv[2],
-                                                description="")
-        self._emit("published package: %s" % pkg_id)
+        """market-publish <dir> <name> <version> [--desc D] [--caps a,b]
+        [--entry file] — build, sign, and publish a package."""
+        argv = self._argv(arg, 3,
+                          "market-publish <dir> <name> <version> "
+                          "[--desc D] [--caps a,b] [--entry file]")
+        desc, caps, entry = "", [], None
+        i = 3
+        while i < len(argv):
+            tok = argv[i]
+            if tok == "--desc" and i + 1 < len(argv):
+                desc = argv[i + 1]
+                i += 2
+            elif tok == "--caps" and i + 1 < len(argv):
+                caps = [c.strip() for c in argv[i + 1].split(",")
+                        if c.strip()]
+                i += 2
+            elif tok == "--entry" and i + 1 < len(argv):
+                entry = argv[i + 1]
+                i += 2
+            else:
+                raise AcpError("INTERNAL",
+                               "usage: market-publish <dir> <name> <version>"
+                               " [--desc D] [--caps a,b] [--entry file]")
+        if entry is None:
+            # fall back to market.json in the source dir, like the
+            # one-shot `acp market publish`
+            try:
+                with open(os.path.join(argv[0], "market.json")) as f:
+                    entry = (json.load(f) or {}).get("entry_point")
+            except (OSError, ValueError):
+                entry = None
+        if not entry:
+            raise AcpError("INTERNAL",
+                           "entry point required: --entry or market.json")
+        manifest = self._market().publish_package(argv[0], argv[1],
+                                                  argv[2], desc, caps,
+                                                  entry)
+        self._emit("published package: %s %s (%d files, sig %s...)"
+                   % (manifest["name"], manifest["version"],
+                      len(manifest["files"]), manifest["sig"][:16]))
 
     @guard
     def do_market_search(self, arg):
@@ -1329,11 +1480,29 @@ class AcpShell(cmd.Cmd):
 
     @guard
     def do_market_install(self, arg):
-        """market-install <name> [version] — verify and install a package."""
-        argv = self._argv(arg, 1, "market-install <name> [version]")
-        ver = argv[1] if len(argv) > 1 else None
-        where = self._market().install_package(argv[0], version=ver)
-        self._emit("installed to: %s" % where)
+        """market-install <name> [version] [--peer <pid>] — verify the
+        publisher signature and install a package (files only, never
+        executed). Typing the command is the explicit approval."""
+        argv = self._argv(arg, 1,
+                          "market-install <name> [version] [--peer <pid>]")
+        ver, peer = None, None
+        rest = argv[1:]
+        if rest and not rest[0].startswith("--"):
+            ver = rest[0]
+            rest = rest[1:]
+        if len(rest) == 2 and rest[0] == "--peer":
+            peer = self._resolve_pid(rest[1])
+        elif rest:
+            raise AcpError("INTERNAL",
+                           "usage: market-install <name> [version] "
+                           "[--peer <pid>]")
+        receipt = self._market().install_package(argv[0], version=ver,
+                                                 from_peer=peer,
+                                                 approve=True)
+        self._emit("installed %s %s (%d files) -> %s  [sig verified: %s]"
+                   % (receipt["name"], receipt["version"],
+                      receipt["files"], receipt["installed"],
+                      _short(receipt["publisher_id"])))
 
     @guard
     def do_market_offer(self, arg):
@@ -1548,6 +1717,50 @@ def build_parser():
     pclk.add_argument("project_id", help="project id")
     pclk.add_argument("--home", required=True, help="home directory")
     pclk.add_argument("--url", help="relay WebSocket URL (connect first)")
+
+    # ---- marketplace (local-only unless --peer/--url is used) ----
+    pmkt = sub.add_parser("market",
+                          help="marketplace: publish/search/install "
+                               "capability packages")
+    pmkt.add_argument("--home", required=True, help="home directory")
+    pmkt.add_argument("--url", help="relay WebSocket URL (connect first)")
+    mkt = pmkt.add_subparsers(dest="market_cmd", required=True)
+
+    pmkp = mkt.add_parser("publish",
+                          help="build, sign, and publish a capability "
+                               "package from a source directory")
+    pmkp.add_argument("source_dir", help="package source directory")
+    pmkp.add_argument("--name",
+                      help="package name (else from market.json in the "
+                           "source dir)")
+    pmkp.add_argument("--version",
+                      help="version string (else from market.json)")
+    pmkp.add_argument("--desc", default=None,
+                      help="description (else from market.json)")
+    pmkp.add_argument("--caps", default=None,
+                      help="comma-separated capabilities (else from "
+                           "market.json)")
+    pmkp.add_argument("--entry", default=None,
+                      help="entry-point file basename (else from "
+                           "market.json)")
+
+    pmki = mkt.add_parser("install",
+                          help="verify the publisher signature and install "
+                               "a package (files only, never executed)")
+    pmki.add_argument("name", help="package name")
+    pmki.add_argument("--version", help="version (latest if omitted)")
+    pmki.add_argument("--peer",
+                      help="peer id to fetch the package from over ACP "
+                           "(local store otherwise)")
+
+    pmks = mkt.add_parser("search",
+                          help="search the local package index")
+    pmks.add_argument("query", nargs="?", default="",
+                      help="free-text query (empty = list all)")
+    pmks.add_argument("--cap", help="filter by capability tag")
+
+    pmkl = mkt.add_parser("installed",
+                          help="list packages installed in this home")
     return p
 
 
@@ -1591,6 +1804,8 @@ def main(argv=None):
             return cmd_channel_history(args, passphrase)
         if args.cmd == "channel-link":
             return cmd_channel_link(args, passphrase)
+        if args.cmd == "market":
+            return cmd_market(args, passphrase)
     except AcpError as e:
         print("ERROR %s: %s" % (e.code, e.detail or ""))
         return 1

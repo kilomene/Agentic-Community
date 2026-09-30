@@ -58,6 +58,10 @@ Config (dict, all optional):
   mailbox_ttl_s             int, default 7 days
   federation_enabled        bool, default False
   trusted_relays_path       default <data_dir>/trusted_relays.json
+  federation_links          list of {"host","port","relay_id"(opt),"note"}
+                            auto-dialed on start, retried until linked
+                            (see docs/FEDERATION.md)
+  fed_dial_retry_s          seconds between link redials, default 15
   fed_ping_interval_s       default 30
   fed_pong_timeout_s        default 90
   fed_announce_interval_s   default 300

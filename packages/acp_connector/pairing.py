@@ -75,6 +75,15 @@ class PairingSession:
         self.created_at = int(time.time())
         self.expires_at = self.created_at + SESSION_TTL
         self.conn = None
+        # One-step enrollment (workstream D). Initiator side:
+        # relay_code is the pairing code we presented to reach the peer.
+        # Responder side: presented_code is the code the initiator put in
+        # the pair_request; enrollment/enrollment_code are set by the
+        # daemon when it auto-accepts inside an enrollment window.
+        self.relay_code = None
+        self.presented_code = None
+        self.enrollment = False
+        self.enrollment_code = None
 
     @property
     def expired(self):
@@ -119,6 +128,11 @@ class PairingSession:
             "handle": c.handle,
             "expires": self.expires_at,
         }
+        if self.enrollment:
+            # One-step enrollment: tell the initiator it may complete
+            # without the human confirm-code step (it auto-confirms with
+            # the pairing code it presented).
+            payload["enrollment"] = True
         c._send_plain(PAIR_CHALLENGE, self.peer_pid, payload)
         self.state = "await_confirm"
         self._persist()
@@ -157,6 +171,39 @@ class PairingSession:
         c.audit.log("pairing.confirmed", actor=self.peer_pid, result="ok",
                     details={"session": self.session_id})
 
+    def confirm_enrollment(self, code):
+        """Initiator: auto-confirm inside a one-step enrollment window.
+
+        Called automatically (never by a human) when the responder's
+        challenge carries the enrollment flag: the pairing code we
+        presented to reach the peer stands in for the human
+        confirm-code step. The responder verifies it against its own
+        live claimed code.
+        """
+        if self.role != "initiator":
+            raise AcpError("PAIRING_FAILED",
+                           "confirm_enrollment is initiator-only")
+        if self.state != "await_code":
+            raise AcpError("PAIRING_FAILED",
+                           f"cannot confirm_enrollment in state {self.state}")
+        self._ensure_live()
+        c = self._mgr._c
+        payload = {
+            "x_pub": c.identity.x_pub.hex(),
+            "ipub": c.identity.ed_pub.hex(),
+            "handle": c.handle,
+            "code": str(code).strip().upper(),
+            "enrollment": True,
+        }
+        # The responder is not in the trust store yet: send with the
+        # X25519 key learned from its pair_challenge.
+        c._send_e2e_untrusted(PAIR_CONFIRM, self.peer_pid,
+                              bytes.fromhex(self.peer_x_pub), payload)
+        self.state = "await_welcome"
+        self._persist()
+        c.audit.log("pairing.enrollment_confirmed", actor=self.peer_pid,
+                    result="ok", details={"session": self.session_id})
+
 
 class PairingManager:
     def __init__(self, connector):
@@ -188,11 +235,19 @@ class PairingManager:
                             result="failed",
                             details={"error": str(e), "when": "complete"})
 
-    def pair_initiate(self, host, port):
-        """Connect and send pair_request. Returns the initiator session."""
+    def pair_initiate(self, host, port, relay_code=None):
+        """Connect and send pair_request. Returns the initiator session.
+
+        ``relay_code``: the relay pairing code presented to reach this
+        peer. It rides along in the request so the responder can run
+        one-step enrollment when a window is open; None means the peer
+        was addressed directly and the confirm-code step always applies.
+        """
         c = self._c
         conn = c.transport.connect(host, port)
         session = self._new_session("initiator")
+        session.relay_code = (str(relay_code).strip().upper()
+                              if relay_code else None)
         session.conn = conn
         c._spawn_reader(conn)
         c.store.set_connection("pending:" + session.session_id, "direct",
@@ -202,6 +257,8 @@ class PairingManager:
             "x_pub": c.identity.x_pub.hex(),
             "ipub": c.identity.ed_pub.hex(),
         }
+        if session.relay_code:
+            payload["relay_code"] = session.relay_code
         env = make_envelope(PAIR_REQUEST, c.peer_id, "*", payload,
                             c.identity.ed_priv)
         conn.send_env(env)
@@ -214,19 +271,24 @@ class PairingManager:
 
         The other agent claims the code first (``new-code``); the relay
         resolves it to their peer id, then the normal relay handshake
-        runs — including the on-screen confirm code. The peer id is
-        never typed by either side.
+        runs — including the on-screen confirm code, unless the
+        responder has an enrollment window open (one-step enrollment).
+        The peer id is never typed by either side.
         """
         pid = self._c.relay_lookup_code(relay_code)
-        return self.pair_initiate_relay(pid)
+        return self.pair_initiate_relay(pid, relay_code=relay_code)
 
-    def pair_initiate_relay(self, peer_pid):
+    def pair_initiate_relay(self, peer_pid, relay_code=None):
         """Start pairing with a peer reachable via the relay (no dial).
 
         The pair_request goes out through the shared relay link
         (Connector._get_conn falls back to it); no per-pid binding is
         created here. The challenge handler binds the peer to the link
         when the response arrives. Returns the initiator session.
+
+        ``relay_code`` is the pairing code presented to resolve the peer
+        (set automatically by pair_initiate_code); the responder uses it
+        for the one-step enrollment check.
         """
         c = self._c
         link = c._relay_link
@@ -234,6 +296,8 @@ class PairingManager:
             raise AcpError("INTERNAL",
                            "no relay link — relay_connect(url) first")
         session = self._new_session("initiator")
+        session.relay_code = (str(relay_code).strip().upper()
+                              if relay_code else None)
         session.peer_pid = peer_pid
         session.conn = link
         payload = {
@@ -241,6 +305,8 @@ class PairingManager:
             "x_pub": c.identity.x_pub.hex(),
             "ipub": c.identity.ed_pub.hex(),
         }
+        if session.relay_code:
+            payload["relay_code"] = session.relay_code
         c._send_plain(PAIR_REQUEST, peer_pid, payload)
         c.audit.log("pairing.initiated", target="relay", result="ok",
                     details={"session": session.session_id,
@@ -299,6 +365,8 @@ class PairingManager:
             peer_handle=payload.get("handle", ""),
             peer_x_pub=_check_x_pub(payload.get("x_pub"), "x_pub"),
             peer_ipub=payload.get("ipub"))
+        session.presented_code = (
+            str(payload.get("relay_code") or "").strip().upper() or None)
         session.conn = conn
         session.code = new_code()
         session.code_hash = code_hash(session.code)
@@ -337,6 +405,11 @@ class PairingManager:
         c._bind_conn(env["from"], conn)
         c.audit.log("pairing.challenge_received", actor=env["from"],
                     result="ok", details={"session": session.session_id})
+        if payload.get("enrollment") and session.relay_code:
+            # One-step enrollment: the responder auto-accepted us inside
+            # an enrollment window. Complete immediately with the pairing
+            # code we presented — no human confirm-code step.
+            session.confirm_enrollment(session.relay_code)
 
     def handle_confirm(self, conn, env, payload):
         """Responder: pair_confirm (E2E) arrived."""
@@ -352,8 +425,18 @@ class PairingManager:
             session._fail("identity keys changed mid-handshake")
             raise AcpError("PAIRING_FAILED",
                            "identity keys changed mid-handshake")
-        if not hmac.compare_digest(str(payload.get("code", "")),
-                                   session.code or ""):
+        if session.enrollment:
+            # One-step enrollment: the confirm-code hash check is
+            # replaced by the presented-code check — the initiator must
+            # echo the daemon's live claimed pairing code.
+            presented = str(payload.get("code", "")).strip().upper()
+            expected = str(session.enrollment_code or "").strip().upper()
+            if (not expected
+                    or not hmac.compare_digest(presented, expected)):
+                session._fail("enrollment code mismatch")
+                raise AcpError("PAIRING_FAILED", "pair code mismatch")
+        elif not hmac.compare_digest(str(payload.get("code", "")),
+                                     session.code or ""):
             session._fail("code mismatch")
             raise AcpError("PAIRING_FAILED", "pair code mismatch")
         c._store_peer(peer_pid, session.peer_handle, session.peer_ipub,

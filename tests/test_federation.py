@@ -11,6 +11,7 @@ Run:  python3 tests/test_federation.py
 """
 import json
 import os
+import socket
 import sys
 import tempfile
 import time
@@ -23,7 +24,8 @@ sys.path.insert(0, os.path.join(ROOT, "services", "acp_relay"))
 
 from acp_crypto import generate_ed25519_keypair, ed25519_publickey  # noqa: E402
 from acp_proto import b62encode, canonical, make_envelope  # noqa: E402
-from federation import allowlist_add  # noqa: E402
+from federation import (allowlist_add, load_or_create_identity,  # noqa: E402
+                        FederationError)
 import relay as relay_mod  # noqa: E402
 
 
@@ -44,6 +46,14 @@ def make_relay(mailbox=True, federation=True):
            "fed_ping_interval_s": 60}
     server, thread = relay_mod.run("127.0.0.1", 0, cfg)
     return server, thread, d
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 def federate(r1, d1, r2, d2):
@@ -213,6 +223,120 @@ class FederationTests(unittest.TestCase):
             finally:
                 ca.close()
                 cb.close()
+        finally:
+            relay_mod.graceful_shutdown(r1, t1)
+            relay_mod.graceful_shutdown(r2, t2)
+
+
+    def test_federation_links_config(self):
+        # Two relays link automatically via the federation_links config:
+        # no manual dial() call. Identities are pre-generated so the
+        # allowlists can be written before either relay starts.
+        d1 = tempfile.mkdtemp()
+        d2 = tempfile.mkdtemp()
+        _, _, id1 = load_or_create_identity(d1)
+        _, _, id2 = load_or_create_identity(d2)
+        allowlist_add(os.path.join(d1, "trusted_relays.json"), id2, "r2")
+        allowlist_add(os.path.join(d2, "trusted_relays.json"), id1, "r1")
+        cfg1 = {"data_dir": d1,
+                "mailbox_enabled": True,
+                "federation_enabled": True,
+                "fed_ping_interval_s": 60,
+                "fed_dial_retry_s": 2}
+        r1, t1 = relay_mod.run("127.0.0.1", 0, cfg1)
+        cfg2 = {"data_dir": d2,
+                "mailbox_enabled": True,
+                "federation_enabled": True,
+                "fed_ping_interval_s": 60,
+                "fed_dial_retry_s": 2,
+                "federation_links": [
+                    {"host": "127.0.0.1",
+                     "port": r1.server_address[1],
+                     "relay_id": id1,
+                     "note": "r1"}]}
+        r2, t2 = relay_mod.run("127.0.0.1", 0, cfg2)
+        try:
+            # link comes up on its own
+            wait_until(lambda: len(r1.federation.links()) == 1,
+                       timeout=45, what="r1 auto-link up")
+            wait_until(lambda: len(r2.federation.links()) == 1,
+                       timeout=45, what="r2 auto-link up")
+            self.assertEqual(
+                list(r2.federation.links())[0], id1,
+                "dialed the pinned relay id")
+            # end-to-end message over the auto-established link
+            p1 = r1.server_address[1]
+            p2 = r2.server_address[1]
+            a_priv, a_pid = gen_pid()
+            b_priv, b_pid = gen_pid()
+            ca, _ = relay_mod.RelayClient.connect("127.0.0.1", p1, a_priv)
+            cb, _ = relay_mod.RelayClient.connect("127.0.0.1", p2, b_priv)
+            try:
+                wait_until(
+                    lambda: r1.federation.route_for(b_pid) is not None,
+                    timeout=30, what="route b->r1")
+                frame = msg_frame(a_priv, a_pid, b_pid, "auto link msg")
+                ca.send_frame(frame)
+                got = cb.recv_frame(timeout=15)
+                self.assertEqual(got, frame)
+            finally:
+                ca.close()
+                cb.close()
+        finally:
+            relay_mod.graceful_shutdown(r1, t1)
+            relay_mod.graceful_shutdown(r2, t2)
+
+    def test_link_failure_degrades_gracefully(self):
+        r1, t1, d1 = make_relay()
+        r2, t2, d2 = make_relay()
+        try:
+            federate(r1, d1, r2, d2)
+            # 1. dial to a dead port raises FederationError (fail-closed),
+            #    and the relay keeps running.
+            with self.assertRaises(FederationError):
+                r1.federation.dial("127.0.0.1", free_port(), timeout=5)
+            self.assertEqual(len(r1.federation.links()), 1)
+            # 2. abrupt link death (no graceful close): both sides drop
+            #    the link and withdraw routes, audit logs the event.
+            link = list(r1.federation.links().values())[0]
+            link.close()
+            wait_until(lambda: len(r1.federation.links()) == 0,
+                       timeout=30, what="r1 drops dead link")
+            wait_until(lambda: len(r2.federation.links()) == 0,
+                       timeout=30, what="r2 drops dead link")
+
+            def link_down_logged():
+                try:
+                    with open(os.path.join(d1, "relay_audit.log")) as f:
+                        return "fed.link_down" in f.read()
+                except FileNotFoundError:
+                    return False
+            wait_until(link_down_logged, timeout=15,
+                       what="fed.link_down audit")
+
+            # 3. the relay still serves LOCAL traffic after the failure.
+            p1 = r1.server_address[1]
+            c_priv, c_pid = gen_pid()
+            e_priv, e_pid = gen_pid()
+            cc, _ = relay_mod.RelayClient.connect("127.0.0.1", p1, c_priv)
+            ce, _ = relay_mod.RelayClient.connect("127.0.0.1", p1, e_priv)
+            try:
+                frame = msg_frame(c_priv, c_pid, e_pid, "local survives")
+                cc.send_frame(frame)
+                got = ce.recv_frame(timeout=10)
+                self.assertEqual(got, frame)
+                # 4. the now-unreachable pid falls back to mailbox
+                #    instead of hanging or crashing.
+                ghost_priv, ghost_pid = gen_pid()
+                cc.send_frame(msg_frame(c_priv, c_pid, ghost_pid,
+                                        "to the void"))
+                resp = cc.recv_json(timeout=10)
+                self.assertFalse(resp.get("relayed"))
+                self.assertEqual(resp.get("error"), "offline")
+                self.assertTrue(resp.get("queued"))
+            finally:
+                cc.close()
+                ce.close()
         finally:
             relay_mod.graceful_shutdown(r1, t1)
             relay_mod.graceful_shutdown(r2, t2)

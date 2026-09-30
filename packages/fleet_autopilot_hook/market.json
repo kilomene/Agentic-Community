@@ -1,0 +1,1 @@
+{"capabilities":["fleet","autopilot","hook"],"description":"Fleet autopilot hook template: default.py + fleet_blocks.py + agent_identity.json pattern. Every fleet agent installs this into its autopilot_hooks dir.","entry_point":"default.py","name":"fleet-autopilot-hook","version":"1.0.0"}

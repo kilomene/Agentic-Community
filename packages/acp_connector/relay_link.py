@@ -357,3 +357,12 @@ class RelayLink:
         if ws is None or self._closed:
             raise AcpError("INTERNAL", "relay link not connected")
         ws.send_ping(payload)
+
+    def send_heartbeat(self):
+        """Send a lightweight heartbeat control frame (``{heartbeat:
+        {ts}}``) to the relay, which records last_heartbeat per peer id
+        for 5-second-resolution fleet presence. Raises AcpError when
+        there is no live connection. Best-effort: a missed beat just
+        marks the agent stale on the head side, never a disconnect."""
+        raw = canonical({"heartbeat": {"ts": int(time.time())}})
+        self.send_raw(struct.pack(">I", len(raw)) + raw)

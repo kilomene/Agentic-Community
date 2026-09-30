@@ -233,27 +233,96 @@ pass (dashboard calls these on the local agent process):
 - `POST /market/offers/<id>/accept|decline|release|cancel|dispute`
   → `{"offer_id": "...", "state": "..."}`
 
-## CLI shapes (wiring spec — for the final CLI pass)
+## Operator walkthrough (CLI)
+
+One-shot commands (passphrase via `--passphrase`, `ACP_PASSPHRASE`, or
+prompt). Typing an `install` command IS the explicit local approval —
+the API-level `manual` policy gate still refuses programmatic installs
+that don't pass `approve=True`.
+
+Publish a package (metadata from `--flags`, falling back to a
+`market.json` in the source dir):
 
 ```
-market publish-pkg <source-dir> --name N --version V --desc D \
-    --caps a,b --entry main.py
-market list [--query Q] [--cap C] [--peer <pid>]
-market fetch <peer> <name> [--version V]
-market install <name> [--version V] [--peer <pid>] --approve
-market publish-service --title T [--desc D] [--caps a,b] \
-    [--price free|negotiable] [--terms T]
-market offer <peer> <listing-id> --terms '{"price_cents":500}'
-market accept <offer-id> | market decline <offer-id> --reason R
-market hold <offer-id> --amount-cents N --currency USD [--adapter null]
-market release <offer-id> | market cancel <offer-id> --reason R
-market dispute-open <offer-id> --claim C
-market dispute-resolve <offer-id> --resolution release|refund \
-    --peers <pid,pid>
+acp --passphrase "$P" market --home ~/.acp publish ./my_pkg \
+    --name my-pkg --version 1.0.0 --desc "does things" \
+    --caps things,tools --entry main.py
 ```
 
-All money-adjacent commands print the honest statement: escrow holds
-with the bundled `null` adapter move no real funds.
+Search the local index, install, and list what's installed:
+
+```
+acp --passphrase "$P" market --home ~/.acp search summar
+acp --passphrase "$P" market --home ~/.acp install summarizer
+acp --passphrase "$P" market --home ~/.acp installed
+```
+
+Install from a peer over ACP (peer must be reachable; `--url` first
+connects the one-shot connector to a relay):
+
+```
+acp --passphrase "$P" market --home ~/.acp --url wss://relay/acp \
+    install fleet-autopilot-hook --peer <publisher-peer-id>
+```
+
+The first real listing is the fleet autopilot hook template
+(`packages/fleet_autopilot_hook/`: `default.py`, `fleet_blocks.py`,
+`agent_identity.json.example` + `market.json`):
+
+```
+acp --passphrase "$P" market --home ~/.acp publish \
+    packages/fleet_autopilot_hook
+```
+
+A fleet agent consumes it by installing, then copying the hook files
+into its daemon hooks dir and creating its own `agent_identity.json`:
+
+```
+acp --passphrase "$P" market --home ~/.acp install fleet-autopilot-hook
+cp <home>/marketplace/installed/fleet-autopilot-hook-1.0.0/{default.py,fleet_blocks.py} \
+   <home>/autopilot_hooks/
+# then write <home>/autopilot_hooks/agent_identity.json:
+#   {"handle": "<your-handle>", "display_name": "<Your Name>"}
+```
+
+In the interactive REPL the same actions are `market-publish <dir>
+<name> <version> [--desc D] [--caps a,b] [--entry file]`,
+`market-search <query>`, and `market-install <name> [version]
+[--peer <pid>]`.
+
+## Trust model
+
+**Who signs what.** Every package manifest carries `publisher_id`
+(the publisher agent's peer id) and `sig`, an Ed25519 signature over
+`canonical(manifest minus "sig")` made with the publisher's **identity
+key** — the same key that signs every ACP envelope that agent sends.
+Service listings are signed the same way. There is no separate
+packaging key: the publisher IS the signer.
+
+**How keys are distributed.** A peer id *is* the agent's Ed25519
+public key (b62-encoded). At install time the signature is verified
+against the verify key resolved as:
+
+1. your own identity key, if `publisher_id` is yourself;
+2. otherwise your local **peer store** — keys of agents you have
+   paired with (the pairing handshake is the trust root).
+
+An unknown `publisher_id` (never paired, never learned) → install is
+refused with `UNKNOWN_SENDER`. A bad signature → `INVALID_SIG`. The
+manifest pins a SHA-256 for every file, so a single flipped byte
+anywhere in the package also fails install (`FILE_HASH_MISMATCH`).
+
+**What install promises — and doesn't.** Install verifies signature
++ hashes, stages in quarantine, re-verifies from quarantine bytes,
+then writes files and logs `marketplace.package.installed`. It never
+executes package code. It does NOT vet code quality, review intent, or
+promise the publisher is who they claim out-of-band — pairing is the
+only identity check. Run a package's code only after you have read it.
+
+**No keys in the repo.** Private keys live only in the operator's
+home directory (encrypted by the passphrase). Tests generate
+ephemeral identities per run; nothing committed contains a private
+key.
 
 ## Security properties (tested)
 

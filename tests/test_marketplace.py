@@ -472,5 +472,94 @@ def test_marketplace_suite():
     assert main() == 0
 
 
+# ------------------------------------------------- focused publish/install
+# Lightweight tests: one Connector, ephemeral identity key, tmp dirs —
+# no pairing, no network. They exercise the exact CLI path:
+# publish (build+sign+store) -> install (verify signature + hashes).
+
+
+def _local_marketplace(prefix):
+    home = tempfile.mkdtemp(prefix=prefix)
+    conn = Connector(home, "tmp-pass", handle="local")
+    return conn, Marketplace(conn)
+
+
+def test_publish_install_roundtrip_tmpdir():
+    """publish -> install round-trip; signature verifies against the
+    publisher's own identity key."""
+    conn, m = _local_marketplace("mkt-rt-")
+    try:
+        pkg = make_pkg_dir()
+        manifest = m.publish_package(pkg, "roundtrip", "1.0.0",
+                                     "round-trip test", ["test"], "main.py")
+        # 1. signature verifies against the publisher key (self here)
+        verified = verify_manifest(manifest, m._pubkey)
+        assert verified["sig"] == manifest["sig"]
+        assert verified["publisher_id"] == conn.peer_id
+        # 2. install round-trips: bytes land on disk, audited, never run
+        receipt = m.install_package("roundtrip", approve=True)
+        assert os.path.isdir(receipt["installed"])
+        with open(os.path.join(receipt["installed"], "main.py")) as f:
+            assert "hello from capability" in f.read()
+        assert os.path.isfile(os.path.join(receipt["installed"],
+                                           "manifest.json"))
+        evs = conn.audit_log(limit=50)
+        assert any(e["action"] == "marketplace.package.installed"
+                   for e in evs)
+    finally:
+        conn.stop()
+
+
+def test_tampered_byte_install_refused():
+    """Flip one byte in the stored package after signing: install must
+    refuse with FILE_HASH_MISMATCH (signature covers the manifest, and
+    the manifest hashes every file)."""
+    conn, m = _local_marketplace("mkt-tamper-")
+    try:
+        pkg = make_pkg_dir()
+        m.publish_package(pkg, "tamperbyte", "1.0.0", "t", ["t"], "main.py")
+        stored = os.path.join(m.packages_dir, "tamperbyte-1.0.0", "main.py")
+        with open(stored, "rb") as f:
+            data = bytearray(f.read())
+        data[10] ^= 0x01  # one byte, post-signing
+        with open(stored, "wb") as f:
+            f.write(bytes(data))
+        expect_acp_error(
+            lambda: m.install_package("tamperbyte", approve=True),
+            "FILE_HASH_MISMATCH")
+    finally:
+        conn.stop()
+
+
+def test_seed_hook_package_publishable():
+    """The first real listing: the fleet autopilot hook template ships
+    as a publishable marketplace package (market.json metadata)."""
+    conn, m = _local_marketplace("mkt-seed-")
+    try:
+        seed_dir = os.path.join(os.path.dirname(__file__), "..",
+                                "packages", "fleet_autopilot_hook")
+        seed_dir = os.path.abspath(seed_dir)
+        assert os.path.isdir(seed_dir), f"missing seed dir {seed_dir}"
+        with open(os.path.join(seed_dir, "market.json")) as f:
+            meta = json.load(f)
+        manifest = m.publish_package(
+            seed_dir, meta["name"], meta["version"],
+            meta["description"], meta["capabilities"],
+            meta["entry_point"])
+        assert manifest["name"] == "fleet-autopilot-hook"
+        assert manifest["entry_point"] == "default.py"
+        paths = sorted(e["path"] for e in manifest["files"])
+        assert "default.py" in paths and "fleet_blocks.py" in paths, paths
+        # signature verifies, and it installs to the right location
+        verify_manifest(manifest, m._pubkey)
+        receipt = m.install_package("fleet-autopilot-hook", approve=True)
+        assert receipt["installed"].endswith(
+            "marketplace/installed/fleet-autopilot-hook-1.0.0")
+        with open(os.path.join(receipt["installed"], "default.py")) as f:
+            assert "fleet_blocks" in f.read()
+    finally:
+        conn.stop()
+
+
 if __name__ == "__main__":
     sys.exit(1 if main() else 0)

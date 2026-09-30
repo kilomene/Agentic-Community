@@ -518,12 +518,13 @@ class Connector:
         self._ext_handlers[kind] = fn
 
     # ---------------------------------------------------------------- pairing
-    def pair_initiate(self, host, port):
-        return self.pairing.pair_initiate(host, port)
+    def pair_initiate(self, host, port, relay_code=None):
+        return self.pairing.pair_initiate(host, port, relay_code=relay_code)
 
-    def pair_initiate_relay(self, peer_pid):
+    def pair_initiate_relay(self, peer_pid, relay_code=None):
         """Start pairing with a peer reachable via the relay (no dial)."""
-        return self.pairing.pair_initiate_relay(peer_pid)
+        return self.pairing.pair_initiate_relay(peer_pid,
+                                               relay_code=relay_code)
 
     def on_pairing_request(self, cb):
         self.pairing.on_pairing_request(cb)

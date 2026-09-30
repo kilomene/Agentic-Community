@@ -272,6 +272,14 @@ class FederationManager:
                                                300))
         self._route_ttl = float(cfg.get("fed_route_ttl_s",
                                         2 * self._announce_interval))
+        # Outbound link targets: [{"host", "port", "relay_id" (optional
+        # pin, for operator reference), "note"}]. Dialed automatically
+        # on start, retried until linked. "relay_id" here is a PUBLIC
+        # relay id (an Ed25519 pubkey) -- never a secret.
+        self._link_targets = list(cfg.get("federation_links") or [])
+        self._dial_retry_s = float(cfg.get("fed_dial_retry_s", 15))
+        self._stop_ev = threading.Event()
+        self._dialer = None
         self._links = {}   # relay_id -> _Link
         self._routes = {}  # pid -> {"link","origin","ts"}
         self._lock = threading.RLock()
@@ -285,12 +293,19 @@ class FederationManager:
             if self._running:
                 return
             self._running = True
+            self._stop_ev.clear()
             self._sweeper = threading.Thread(target=self._sweep_loop,
                                              daemon=True,
                                              name="fed-sweeper")
             self._sweeper.start()
+            if self._link_targets:
+                self._dialer = threading.Thread(target=self._dial_loop,
+                                                daemon=True,
+                                                name="fed-dialer")
+                self._dialer.start()
 
     def stop(self):
+        self._stop_ev.set()
         with self._lock:
             self._running = False
             links = list(self._links.values())
@@ -299,6 +314,9 @@ class FederationManager:
         if self._sweeper is not None:
             self._sweeper.join(timeout=5)
             self._sweeper = None
+        if self._dialer is not None:
+            self._dialer.join(timeout=5)
+            self._dialer = None
 
     def _sweep_loop(self):
         while True:
@@ -313,6 +331,57 @@ class FederationManager:
                 self._tick()
             except Exception:
                 pass
+
+    def _dial_loop(self):
+        """Auto-dial configured federation_links until each is linked.
+
+        Runs for the life of the manager; a peer that is down is
+        retried every fed_dial_retry_s seconds (failures are audit
+        logged, never fatal). If both sides configure each other the
+        two dials converge to a single link (last dial wins, the
+        replaced link is closed by _add_link).
+        """
+        while not self._stop_ev.is_set():
+            for entry in list(self._link_targets):
+                if self._stop_ev.is_set():
+                    return
+                if not isinstance(entry, dict):
+                    continue
+                host = entry.get("host")
+                port = entry.get("port")
+                if not host or not port:
+                    continue
+                want = entry.get("relay_id")  # optional operator pin
+                linked_id = entry.get("_linked_id") or want
+                with self._lock:
+                    if linked_id:
+                        lk = self._links.get(linked_id)
+                        if lk is not None and lk.alive:
+                            continue
+                    elif any(lk.alive for lk in self._links.values()):
+                        continue
+                note = entry.get("note") or ""
+                try:
+                    peer_id = self.dial(host, int(port), timeout=10)
+                except Exception as e:
+                    self._server.audit(
+                        "fed.dial_failed",
+                        {"host": host, "port": port, "note": note,
+                         "error": str(e)[:160]})
+                    continue
+                if want and want != peer_id:
+                    # Pinned id mismatch: do not trust this link.
+                    with self._lock:
+                        lk = self._links.get(peer_id)
+                    if lk is not None:
+                        self.link_closed(lk)
+                    self._server.audit(
+                        "fed.dial_failed",
+                        {"host": host, "port": port, "note": note,
+                         "error": "relay_id pin mismatch"})
+                    continue
+                entry["_linked_id"] = peer_id
+            self._stop_ev.wait(self._dial_retry_s)
 
     def _tick(self):
         now = time.time()
@@ -399,7 +468,10 @@ class FederationManager:
         with self._lock:
             if not self._running:
                 raise FederationError("federation not started")
-        sock = socket.create_connection((host, port), timeout=timeout)
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout)
+        except OSError as e:
+            raise FederationError("link dial failed: %s" % e)
         try:
             ts = int(time.time())
             body = self._signed({"relay_id": self.relay_id, "ts": ts})
@@ -710,3 +782,45 @@ class FederationManager:
         else:
             self._server.audit("fed.dropped_no_route",
                                {"to": target[:16]})
+
+
+# -- operator CLI -----------------------------------------------------
+# Helpers for linking relays. Relay ids are PUBLIC (Ed25519 verify
+# keys); the only secret is <data_dir>/relay_identity.key, which is
+# never printed or transmitted by this tool.
+
+def _cli(argv=None):
+    import argparse
+    p = argparse.ArgumentParser(
+        description="acp_relay federation helpers: exchange relay ids "
+                    "out-of-band and manage the trusted-relays allowlist.")
+    p.add_argument("--data-dir", required=True,
+                   help="relay data directory")
+    p.add_argument("--trusted-relays-path", default=None,
+                   help="override trusted_relays.json location")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--print-relay-id", action="store_true",
+                   help="print this relay's relay_id (share it with the "
+                        "other operator)")
+    g.add_argument("--add-trusted", metavar="RELAY_ID",
+                   help="add a peer relay id to the allowlist")
+    p.add_argument("--note", default="",
+                   help="note stored alongside the allowlisted id")
+    args = p.parse_args(argv)
+    _, _, relay_id = load_or_create_identity(args.data_dir)
+    if args.print_relay_id:
+        print(relay_id)
+        return 0
+    try:
+        vkey_from_pid(args.add_trusted)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        p.error("RELAY_ID is not a valid relay id")
+    path = (args.trusted_relays_path or
+            os.path.join(args.data_dir, "trusted_relays.json"))
+    allowlist_add(path, args.add_trusted, args.note)
+    print("added %s to %s" % (args.add_trusted, path))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

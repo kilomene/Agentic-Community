@@ -43,11 +43,25 @@ import sys
 import threading
 import time
 
+# One-step enrollment (workstream D): the enrollment module ships in the
+# same directory as this file in every layout (repo checkout, installed
+# lib/, tests). Package-style first (python -m acp_relay_daemon.daemon),
+# then plain (script / test import).
+try:
+    from acp_relay_daemon import enrollment as _enrollment
+except ImportError:
+    try:
+        import enrollment as _enrollment
+    except ImportError:
+        _enrollment = None
+
 LOG = logging.getLogger("acp-relay-daemon")
 
 PAIR_CODE_TTL = 3600          # codes live 1h; refreshed before expiry
 CODE_REFRESH_AHEAD = 600    # re-claim the same code when <10 min of life remain
 PING_INTERVAL = 30          # WebSocket keepalive: idle middleboxes kill quiet links
+HEARTBEAT_INTERVAL = 5      # fleet heartbeat: 5s-resolution liveness detection
+                            # (liveness detection ONLY — never resurrection)
 PAIR_CODE_REFRESH_AT = 600    # re-claim when <10 min of life remains
 BACKOFFS = (5, 10, 20, 30, 60, 120, 300)  # reconnect backoff, seconds
 
@@ -264,25 +278,12 @@ class Daemon:
         def _on_pair_req(session):
             # API is cb(session): session.peer_pid / peer_handle, and
             # session.code is the on-screen confirm code for the user.
-            # Auto-send the challenge immediately (same as the `acp`
-            # CLI): the human trust step is the 6-char confirm code,
-            # typed on the OTHER side out-of-band. Waiting for a manual
-            # accept here would deadlock headless pairing — the
-            # initiator would sit in await_challenge forever with no
-            # way to proceed, and the confirm code would be useless.
-            try:
-                session.accept()
-            except Exception as e:  # noqa: BLE001 - AcpError on bad state
-                LOG.error("could not auto-accept pairing request %s: %s",
-                          session.session_id, e)
-                return
-            LOG.warning(
-                "PAIRING REQUEST from %s (%s) -- challenge sent, confirm "
-                "code: %s (session %s). Read the code to the user NOW; "
-                "they type it on the other side to complete pairing.",
-                _short(session.peer_pid), session.peer_handle or "?",
-                session.code, session.session_id)
-            self._record_pairing_request(session)
+            # Enrollment windows are checked first (one-step join);
+            # otherwise the challenge is auto-sent immediately (same as
+            # the `acp` CLI) and the human trust step is the 6-char
+            # confirm code, typed on the OTHER side out-of-band. Waiting
+            # for a manual accept here would deadlock headless pairing.
+            self._handle_pair_request(session)
 
         def _on_file(peer_pid, offer):
             LOG.info("inbound file offer from %s: %s", _short(peer_pid),
@@ -325,7 +326,99 @@ class Daemon:
             LOG.warning("autopilot disabled: %s", e)
             self.autopilot = None
 
-    def _record_pairing_request(self, session):
+    # ------------------------------------------- pairing-request handling
+    # One-step enrollment (workstream D): when the head opens an
+    # enrollment window (``fleet enroll --open <minutes>``), a pairing
+    # request that presents our live pairing code auto-completes with NO
+    # confirm-code step. With no window open the confirm-code flow below
+    # runs exactly as before — the default is unchanged.
+
+    def _handle_pair_request(self, session):
+        """on_pairing_request entry point. Tries enrollment first; falls
+        back to the confirm-code flow when no window is open."""
+        if self._maybe_enroll(session):
+            return
+        try:
+            session.accept()
+        except Exception as e:  # noqa: BLE001 - AcpError on bad state
+            LOG.error("could not auto-accept pairing request %s: %s",
+                      session.session_id, e)
+            return
+        pid = session.peer_pid
+        pid = pid[:16] + "..." if pid and len(pid) > 16 else pid
+        LOG.warning(
+            "PAIRING REQUEST from %s (%s) -- challenge sent, confirm "
+            "code: %s (session %s). Read the code to the user NOW; "
+            "they type it on the other side to complete pairing.",
+            pid, session.peer_handle or "?",
+            session.code, session.session_id)
+        self._record_pairing_request(session)
+
+    def _maybe_enroll(self, session):
+        """Try enrollment auto-accept for one pairing request.
+
+        Returns True when the session was accepted via enrollment (the
+        caller must do nothing further); False to keep the
+        confirm-code flow. Expiry is checked here on EVERY attempt, so
+        an expired window can never auto-accept even if the periodic
+        sweep hasn't run yet.
+        """
+        if _enrollment is None:
+            return False
+        with self._code_lock:
+            code = self.code
+        try:
+            decision = _enrollment.evaluate_request(
+                session, code, self.args.state_dir)
+        except Exception as e:  # noqa: BLE001 - never break pairing on this
+            LOG.warning("enrollment check failed: %s", e)
+            return False
+        if decision is None:
+            return False
+        session.enrollment = True
+        session.enrollment_code = decision["code"]
+        try:
+            session.accept()
+        except Exception as e:  # noqa: BLE001 - AcpError on bad state
+            LOG.error("enrollment auto-accept failed for %s: %s",
+                      session.session_id, e)
+            return False
+        pid = session.peer_pid
+        pid = pid[:16] + "..." if pid and len(pid) > 16 else pid
+        LOG.warning(
+            "ENROLLMENT pairing from %s (%s) -- auto-accepted, NO "
+            "confirm code (window open until %s, session %s).",
+            pid, session.peer_handle or "?",
+            decision["open_until"], session.session_id)
+        self._record_pairing_request(session, enrolled=True)
+        try:
+            self.conn.audit.log(
+                "pairing.enrolled", actor=session.peer_pid, result="ok",
+                details={"session": session.session_id,
+                         "handle": session.peer_handle,
+                         "via": "enrollment",
+                         "at": int(time.time()),
+                         "window_until": decision["open_until"]})
+        except Exception as e:  # noqa: BLE001 - audit must not break pairing
+            LOG.warning("enrollment audit failed: %s", e)
+        return True
+
+    def _enrollment_sweep(self):
+        """Periodic enrollment-window expiry sweep.
+
+        Runs every serve-loop cycle (30s). Belt and suspenders next to
+        the per-attempt expiry check in _maybe_enroll: expiry never
+        relies on a single timer.
+        """
+        if _enrollment is None:
+            return
+        try:
+            if _enrollment.sweep_expired(self.args.state_dir):
+                LOG.warning("enrollment window expired; auto-closed")
+        except Exception as e:  # noqa: BLE001 - never break the serve loop
+            LOG.warning("enrollment sweep failed: %s", e)
+
+    def _record_pairing_request(self, session, enrolled=False):
         """Persist a pending inbound request (incl. confirm code) so the
         owner can read it even if the daemon restarts. Entries whose
         sessions are done/failed/expired (e.g. superseded by a newer
@@ -354,6 +447,7 @@ class Daemon:
                 "peer_handle": session.peer_handle,
                 "code": session.code,
                 "received_at": int(time.time()),
+                "enrolled": bool(enrolled),
             })
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
@@ -467,6 +561,13 @@ class Daemon:
                 if kind == "group_msg":
                     self._fleet_group_chat().send_group_message(
                         req["group_id"], req["text"])
+                elif kind == "direct_msg":
+                    # Workstream C (wake-on-task): a task card queued for
+                    # one fleet agent. Goes through the daemon's live
+                    # relay link; when the agent is offline/suspended the
+                    # relay holds it in the mailbox and drains it on the
+                    # agent's next connect (before any new traffic).
+                    self.conn.send_message(req["to_pid"], req["text"])
                 else:
                     raise ValueError("unknown outbox kind %r" % (kind,))
             except Exception as e:  # noqa: BLE001 - retry next cycle
@@ -532,17 +633,40 @@ class Daemon:
         """Block until the link drops (the Connector's reader thread owns
         the socket); refresh the pairing code in the background and send
         a WebSocket ping every cycle so idle middleboxes (Cloudflare
-        edge, NAT, proxies) don't silently kill a quiet connection."""
+        edge, NAT, proxies) don't silently kill a quiet connection.
+
+        Workstream A: also sends a lightweight heartbeat control frame
+        every 5s so the relay can track per-peer liveness at 5-second
+        resolution (the head reads this as fleet presence). A missed beat
+        is never fatal — heartbeats are best-effort; the 30s WebSocket
+        ping still owns drop detection."""
         from acp_proto import AcpError  # local import: matches module style
+        last_hb = 0.0
+        last_ping = 0.0
         while not link.closed and not self._stop.is_set():
             self._refresh_code_if_needed()
             self._drain_outbox()
             self._ensure_auto_update()
-            try:
-                link.send_ping()
-            except AcpError:
-                break  # send marks the link closed; reconnect takes over
-            self._stop.wait(PING_INTERVAL)
+            # Workstream D: periodic enrollment-window expiry sweep (the
+            # per-attempt check in _maybe_enroll is the other half; expiry
+            # never relies on a single timer).
+            self._enrollment_sweep()
+            now = time.monotonic()
+            if now - last_hb >= HEARTBEAT_INTERVAL:
+                # Fleet liveness heartbeat (best-effort: a missed beat
+                # just marks the agent stale head-side, never a drop).
+                try:
+                    link.send_heartbeat()
+                except AcpError:
+                    pass  # link is down; the WS ping below detects it
+                last_hb = now
+            if now - last_ping >= PING_INTERVAL:
+                try:
+                    link.send_ping()
+                except AcpError:
+                    break  # send marks the link closed; reconnect takes over
+                last_ping = now
+            self._stop.wait(min(HEARTBEAT_INTERVAL, PING_INTERVAL))
         if link.closed:
             LOG.warning("relay link dropped")
 

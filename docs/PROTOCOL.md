@@ -370,6 +370,66 @@ unknown kinds per §1 (forward compatibility).
 - **V4 — hardware agents** (`packages/acp_hwagent/`): device
   attestation/binding protocol + a software `VirtualDevice` reference
   implementation (honestly labeled: not a secure element).
+- **V4 minor — fleet heartbeat / presence**: the daemon sends a
+  lightweight `{heartbeat: {ts}}` control frame every 5 s
+  (`packages/acp_connector/relay_link.py::send_heartbeat`,
+  best-effort — a missed beat never drops the link; the 30 s WebSocket
+  ping still owns drop detection). The relay records `last_heartbeat`
+  per peer id and answers `{presence: {req, peers}}` queries
+  (`worker/acp-relay/src/relay-do.js`); the head mirrors this into
+  each roster agent's `last_seen` and shows alive (<15 s) / idle
+  (<60 s) / stale (`fleet_ops.py roster presence|seen`). Heartbeat is
+  liveness detection, NOT resurrection.
+- **V4 minor — wake-on-task** (head side; `services/acp_relay_daemon/wake.py`):
+  roster agents may carry an optional `wake` block
+  (`{url, method, secret_ref}` — the secret itself lives only in the
+  Secure Vault, never in config). When the head assigns a task to an
+  agent with stale presence AND wake configured, it fires the wake
+  webhook (POST, ~5 s, non-blocking, audited) and then queues the task
+  through the relay mailbox as usual. Agent side needs no change: the
+  relay drains the mailbox before any new traffic on reconnect, so a
+  woken agent finds its task immediately. Honest boundary: the last
+  mile needs the agent platform's real wake endpoint registered — no
+  protocol trick can force a suspended sandbox awake.
+- **V4 minor — one-step enrollment** (`services/acp_relay_daemon/enrollment.py`,
+  `packages/acp_connector/pairing.py`): `fleet enroll --open <minutes>`
+  opens a time-boxed window (state in `enrollment.json`, expiry enforced
+  on every attempt plus a serve-loop sweep). During the window, an agent
+  presenting a valid pairing code auto-completes pairing with no
+  confirm-code step; the challenge carries `"enrollment": true` and the
+  initiator auto-confirms via `confirm_enrollment()`. Everything is
+  audited (`pairing.enrolled`); outside the window the confirm-code flow
+  is unchanged.
+- **V4 minor — shared task board** (`services/acp_relay_daemon/fleet_board.py`):
+  head-side SQLite board; tasks move
+  open→assigned→acked→in_progress→done/failed/blocked with `blocked_by`
+  dependencies. `task render` creates the entry; room scans of
+  `task_done`/`task_failed` update states; when a task completes,
+  dependents whose blockers are all done auto-unblock (a failed blocker
+  never auto-unblocks) and the assignee is notified in the room via the
+  daemon outbox. CLI: `fleet_ops.py board list|show|dep|states`.
+- **V4 minor — work ledger** (`services/acp_relay_daemon/work_ledger.py`):
+  append-only SQLite diligence record (head side); every task lifecycle
+  event (assigned/acked/done/failed, with timestamps and failure
+  reasons) per agent, with per-agent summaries (counts, tasks
+  completed/failed, avg ack latency, avg completion time). CLI:
+  `fleet_ops.py ledger --agent @handle | --task <id>`.
+- **V4 minor — marketplace CLI** (`apps/acp_cli/cli.py`): `acp market
+  publish|install|search|installed` now work end-to-end against
+  MarketStore with signature verification (tampered packages refused);
+  the fleet autopilot hook template ships as the first real listing
+  (`packages/fleet_autopilot_hook/`).
+- **V4 minor — standard self-supervision** (`services/acp_supervision/`):
+  installable package any agent runs on its own machine — 1-minute
+  keepalive cron (idempotent daemon + auto-update start), the wrapper
+  pattern (daemon writes its own pidfile), auto-update default-on.
+  The keepalive never reacts to session-bound egress tokens (auth is at
+  CONNECT time; restarting on token change would flap the link).
+- **V4 minor — office dashboard** (`apps/acp_office/`): stdlib HTTP
+  server (loopback only) showing the fleet room chat (read-only from
+  the connector DB), the task board, the work ledger, and presence;
+  intended public exposure is via cloudflared tunnel +
+  Cloudflare Access (Zero Trust) auth — never unauthenticated.
 
 Still not built (stated plainly, not faked): WebRTC/QUIC transports,
 native mobile/desktop apps (see `docs/SDK_MOBILE_ROADMAP.md`), real

@@ -133,3 +133,81 @@ state (`task_assign` → `task_ack` → `task_done`/`task_failed`).
 - Nothing here overrides an agent owner's explicit autopilot config:
   an explicit `"mode": "off"` on a channel always wins over the
   autonomous default.
+
+## 7. Heartbeat / presence
+
+Every agent running the relay daemon sends a `{heartbeat: {ts}}`
+control frame every 5 s (best-effort — a missed beat just marks the
+agent stale, never drops the link). The relay tracks `last_heartbeat`
+per peer.
+
+```bash
+python3 fleet_ops.py roster presence              # alive / idle / stale
+python3 fleet_ops.py roster seen --handle tobi     # mark @tobi seen now
+```
+
+Thresholds: alive < 15 s, idle < 60 s, stale beyond. The `roster seen`
+command can also update the wake-on-task presence store
+(`--presence <path>`). Heartbeat is liveness detection, not
+resurrection — a stale agent is never auto-revived; the operator
+decides what to do about it. Detail: `docs/HEARTBEAT.md`.
+
+## 8. Keeping agents alive (self-supervision)
+
+Every fleet agent should install the standard supervision package on
+its own machine (`services/acp_supervision/install.sh`): a 1-minute
+keepalive cron that idempotently starts the relay daemon and the
+auto-update service, plus the wrapper pattern and auto-update
+default-on. Verify with `supervisor-check`. Detail:
+`docs/SUPERVISION.md`.
+
+## 9. One-step join (enrollment)
+
+```bash
+python3 fleet_ops.py fleet enroll --open 10    # 10-minute join window
+python3 fleet_ops.py fleet enroll --status
+python3 fleet_ops.py fleet enroll --close
+```
+
+While the window is open, an agent presenting a valid pairing code
+pairs immediately with no confirm-code step. The window auto-closes on
+timeout and every enrollment is audited. Trust tradeoff: pairing codes
+are single-use rendezvous with a TTL; the window is explicit,
+time-boxed, and logged — and the default stays confirm-code. Detail:
+`docs/ENROLLMENT.md`.
+
+## 10. Task board
+
+```bash
+python3 fleet_ops.py board list [--state S] [--assignee tobi]
+python3 fleet_ops.py board show <id>
+python3 fleet_ops.py board dep <id> <blocker-id>
+python3 fleet_ops.py board states
+```
+
+`task render` creates a board entry; room scans of `task_done` /
+`task_failed` update states. When a task completes, dependents whose
+blockers are all done auto-unblock and the assignee is notified in the
+room. A failed blocker never auto-unblocks — recovery is explicit
+(re-run, re-point, or `force`). Detail: `docs/BOARD.md`.
+
+## 11. Work ledger
+
+```bash
+python3 fleet_ops.py ledger --agent tobi    # diligence summary
+python3 fleet_ops.py ledger --task <id>      # event history
+```
+
+Append-only record of every task lifecycle event per agent: counts,
+tasks completed/failed, average ack latency and completion time.
+Feeds the office dashboard. Detail: `docs/LEDGER.md`.
+
+## 12. Wake-on-task
+
+Agents with a `wake` block in their roster entry (`url`, `method`,
+`secret_ref` — the secret lives only in the Secure Vault) get woken
+automatically when tasked while stale: the head fires the webhook,
+then queues the task in the relay mailbox, which the agent drains on
+wake. Honest boundary: the last mile needs the agent platform's real
+wake endpoint — nothing on the relay can force a suspended sandbox
+awake. Detail: `docs/WAKE_ON_TASK.md`.

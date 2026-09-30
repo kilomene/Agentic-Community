@@ -170,6 +170,11 @@ export class AcpRelay extends DurableObject {
     this.nextId = 1; // persisted mailbox id counter
     this.queues = new Map(); // pid -> { entries: [{id,ts,size,n}], bytes }
     this.codes = new Map(); // pair code -> { pid, expiresAt, ws }
+    // Workstream A: fleet presence — last heartbeat arrival per peer id
+    // (Date.now() ms). Peers heartbeat every 5s; entries are dropped on
+    // disconnect. Heartbeat = LIVENESS detection, NOT resurrection: the
+    // relay never restarts or revives a stale agent.
+    this.heartbeats = new Map(); // pid -> last heartbeat ms
     this.lookupHits = new Map(); // ws -> [timestamp ms] (lookup rate limit)
     // No fetch/message is processed until persisted state is loaded.
     ctx.blockConcurrencyWhile(() => this.#load());
@@ -240,6 +245,9 @@ export class AcpRelay extends DurableObject {
   #onClose(conn, helloTimer, ev) {
     if (helloTimer) clearTimeout(helloTimer);
     this.draining.delete(conn.pid);
+    // Workstream A: drop the peer's heartbeat record on disconnect so
+    // presence only ever lists currently-connected agents.
+    if (conn.pid) this.heartbeats.delete(conn.pid);
     if (conn.pid && this.peers.get(conn.pid) === conn.ws) {
       this.peers.delete(conn.pid);
     }
@@ -372,6 +380,28 @@ export class AcpRelay extends DurableObject {
     }
     if ("ping" in obj) {
       this.#sendControl(conn.ws, { pong: obj.ping });
+      return;
+    }
+    // Workstream A: fleet liveness heartbeat. Record last_heartbeat per
+    // peer id and ack; the head reads the roster via the presence query
+    // below (alive <15s, idle <60s, stale beyond).
+    if ("heartbeat" in obj) {
+      this.heartbeats.set(conn.pid, Date.now());
+      const body = obj.heartbeat;
+      this.#sendControl(conn.ws, {
+        heartbeat_ack: {
+          ts: body && Number.isInteger(body.ts) ? body.ts : null,
+        },
+      });
+      return;
+    }
+    if ("presence" in obj) {
+      const body = obj.presence;
+      const req = body && typeof body.req === "string" ? body.req : "";
+      const peers = [...this.heartbeats.entries()]
+        .map(([pid, hb]) => ({ pid, last_heartbeat: hb }))
+        .sort((a, b) => (a.pid < b.pid ? -1 : a.pid > b.pid ? 1 : 0));
+      this.#sendControl(conn.ws, { presence: { req, peers } });
       return;
     }
     if ("mailbox_ack" in obj) {
