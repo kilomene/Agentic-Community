@@ -15,6 +15,9 @@ Endpoints (all GET, all under /api/ require X-Office-Token):
   /api/tasks             task board grouped by state, with blocked/deps
   /api/ledger            recent work events + per-agent summaries
   /api/presence          fleet roster presence: alive/idle/stale
+  /api/roster            fleet roster file: handles, display names, notes
+  POST /api/chat         queue a fleet message via the daemon outbox
+                         (JSON body {"text": ...}, same X-Office-Token auth)
 
 Missing/empty DBs or tables are handled gracefully: the endpoint
 returns an empty collection plus a "no data yet" note, never a crash.
@@ -71,6 +74,12 @@ def default_paths():
         "fleet_json": os.environ.get(
             "ACP_OFFICE_FLEET_JSON",
             os.path.join(state_dir, "fleet.json")),
+        "roster_json": os.environ.get(
+            "ACP_OFFICE_ROSTER_JSON",
+            os.path.join(state_dir, "fleet-roster.json")),
+        "outbox_dir": os.environ.get(
+            "ACP_OFFICE_OUTBOX_DIR",
+            os.path.join(state_dir, "outbox")),
     }
 
 
@@ -178,6 +187,11 @@ class Office:
         "/api/tasks": "api_tasks",
         "/api/ledger": "api_ledger",
         "/api/presence": "api_presence",
+        "/api/roster": "api_roster",
+    }
+
+    _POST_HANDLERS = {
+        "/api/chat": "api_chat_post",
     }
 
     def _handle(self, req, method):
@@ -201,15 +215,20 @@ class Office:
                                  "detail": "missing or wrong X-Office-Token"},
                            401)
                 return
-            if method != "GET":
-                self._json(req, {"ok": False, "code": "METHOD_NOT_ALLOWED"},
-                           405)
+            handler = None
+            if method == "GET":
+                handler = self._GET_HANDLERS.get(raw_path)
+            elif method == "POST":
+                handler = self._POST_HANDLERS.get(raw_path)
+            if handler is None:
+                known = (raw_path == "/" or raw_path in self._GET_HANDLERS
+                         or raw_path in self._POST_HANDLERS)
+                self._json(req, {"ok": False,
+                                 "code": "METHOD_NOT_ALLOWED"
+                                 if known else "NOT_FOUND"},
+                           405 if known else 404)
                 return
-            if raw_path in self._GET_HANDLERS:
-                getattr(self, self._GET_HANDLERS[raw_path])(
-                    req, parse_qs(split.query))
-            else:
-                self._json(req, {"ok": False, "code": "NOT_FOUND"}, 404)
+            getattr(self, handler)(req, parse_qs(split.query))
         except BrokenPipeError:
             pass
         except Exception as e:  # never crash the server thread
@@ -256,6 +275,23 @@ class Office:
         except (TypeError, ValueError):
             n = default
         return max(1, min(n, maximum))
+
+    def _read_json_body(self, req, max_len=65536):
+        """Read and parse a JSON request body. Returns (obj, error)."""
+        try:
+            length = int(req.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0 or length > max_len:
+            return None, "empty or too large body"
+        try:
+            raw = req.rfile.read(length)
+        except Exception:
+            return None, "unreadable body"
+        try:
+            return json.loads(raw.decode("utf-8")), None
+        except (ValueError, UnicodeDecodeError):
+            return None, "invalid JSON"
 
     # --------------------------------------------------------------- data
     def _sender_names(self, db):
@@ -496,3 +532,69 @@ class Office:
             return {}
         agents = data.get("agents")
         return agents if isinstance(agents, dict) else {}
+
+    def api_roster(self, req, query):
+        """Fleet roster file: handles, display names, agent ids, notes."""
+        try:
+            with open(self.paths["roster_json"], "r",
+                      encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            self._json(req, {"ok": True, "agents": [],
+                             "note": "no data yet"})
+            return
+        raw = data.get("agents")
+        agents = []
+        if isinstance(raw, dict):
+            for handle, entry in raw.items():
+                if not isinstance(entry, dict):
+                    continue
+                agents.append({
+                    "handle": handle,
+                    "display_name": entry.get("display_name") or handle,
+                    "agent_id": entry.get("agent_id"),
+                    "status": entry.get("status") or "active",
+                    "note": entry.get("note") or "",
+                })
+        agents.sort(key=lambda a: a["display_name"].lower())
+        self._json(req, {"ok": True, "agents": agents})
+
+    def api_chat_post(self, req, query):
+        """Queue a fleet message via the daemon outbox (drained by the
+        relay daemon through its own live connection)."""
+        body, err = self._read_json_body(req)
+        if err:
+            self._json(req, {"ok": False, "code": "BAD_REQUEST",
+                             "detail": err}, 400)
+            return
+        text = body.get("text") if isinstance(body, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            self._json(req, {"ok": False, "code": "BAD_REQUEST",
+                             "detail": "text is required"}, 400)
+            return
+        text = text.strip()
+        if len(text) > 2000:
+            self._json(req, {"ok": False, "code": "BAD_REQUEST",
+                             "detail": "text too long (max 2000 chars)"},
+                       400)
+            return
+        outbox = self.paths["outbox_dir"]
+        try:
+            os.makedirs(outbox, exist_ok=True)
+        except OSError:
+            self._json(req, {"ok": False, "code": "INTERNAL",
+                             "detail": "outbox unavailable"}, 500)
+            return
+        fname = "%s-%s.json" % (time.strftime("%Y%m%d%H%M%S"),
+                                secrets.token_hex(4))
+        payload = {"kind": "group_msg", "group_id": self.group_id,
+                   "text": text}
+        try:
+            with open(os.path.join(outbox, fname), "w",
+                      encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+        except OSError:
+            self._json(req, {"ok": False, "code": "INTERNAL",
+                             "detail": "queue failed"}, 500)
+            return
+        self._json(req, {"ok": True, "queued": True})

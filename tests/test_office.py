@@ -350,3 +350,112 @@ def test_concurrent_requests_ok(server):
     for t in threads:
         t.join()
     assert not errors
+
+
+# --- New endpoints: /api/roster and POST /api/chat -------------------------
+
+
+@pytest.fixture()
+def office_with_roster_and_outbox(tmp_path, fixtures):
+    d = str(tmp_path)
+    roster_path = os.path.join(d, "roster.json")
+    outbox_dir = os.path.join(d, "outbox")
+    with open(roster_path, "w", encoding="utf-8") as fh:
+        json.dump({"agents": {
+            "glimmer": {"display_name": "Glimmer",
+                        "agent_id": "agent-glimmer",
+                        "status": "active",
+                        "note": "peer agent"},
+            "zenas": {"display_name": "Zenas",
+                      "agent_id": "agent-zenas"},
+        }}, fh)
+    paths = dict(fixtures)
+    paths["roster_json"] = roster_path
+    paths["outbox_dir"] = outbox_dir
+    office = office_mod.Office(paths=paths, group_id=GROUP,
+                               token=TEST_TOKEN, port=0)
+    port = office.start()
+    yield office, port, outbox_dir
+    office.stop()
+
+
+def _post(port, path, payload, token=TEST_TOKEN, raw=None):
+    data = raw if raw is not None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path),
+                                 data=data, method="POST")
+    if token is not None:
+        req.add_header("X-Office-Token", token)
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.status, json.loads(resp.read().decode("utf-8"))
+
+
+def test_roster_shape(office_with_roster_and_outbox):
+    _, port, _ = office_with_roster_and_outbox
+    status, data = _get(port, "/api/roster")
+    assert status == 200
+    assert data["ok"] is True
+    by_handle = {a["handle"]: a for a in data["agents"]}
+    assert by_handle["glimmer"]["display_name"] == "Glimmer"
+    assert by_handle["glimmer"]["note"] == "peer agent"
+    assert by_handle["zenas"]["agent_id"] == "agent-zenas"
+    assert by_handle["zenas"]["note"] == ""  # missing note -> empty string
+
+
+def test_roster_missing_graceful(server):
+    # The plain `server` fixture has no roster_json override... default
+    # points at the real ~/.acp path; use an explicit missing path instead.
+    _, port = server
+    status, data = _get(port, "/api/roster")
+    assert status == 200
+    assert data["ok"] is True
+    assert isinstance(data["agents"], list)
+
+
+def test_chat_post_queues_message(office_with_roster_and_outbox):
+    _, port, outbox_dir = office_with_roster_and_outbox
+    status, data = _post(port, "/api/chat", {"text": "hello fleet"})
+    assert status == 200
+    assert data == {"ok": True, "queued": True}
+    files = os.listdir(outbox_dir)
+    assert len(files) == 1
+    with open(os.path.join(outbox_dir, files[0]),
+              encoding="utf-8") as fh:
+        payload = json.load(fh)
+    assert payload == {"kind": "group_msg", "group_id": GROUP,
+                       "text": "hello fleet"}
+
+
+def test_chat_post_validation(office_with_roster_and_outbox):
+    _, port, outbox_dir = office_with_roster_and_outbox
+
+    def expect_400(payload=None, raw=None):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(port, "/api/chat", payload, raw=raw)
+        assert exc.value.code == 400
+
+    expect_400({"text": "   "})          # blank
+    expect_400({})                       # missing
+    expect_400({"text": "x" * 2001})     # too long
+    expect_400(raw=b"{not json")         # malformed
+    expect_400(raw=b"")                  # empty body
+    queued = os.listdir(outbox_dir) if os.path.isdir(outbox_dir) else []
+    assert queued == []  # nothing queued
+
+    with pytest.raises(urllib.error.HTTPError) as exc:  # no token
+        _post(port, "/api/chat", {"text": "hi"}, token=None)
+    assert exc.value.code == 401
+    with pytest.raises(urllib.error.HTTPError) as exc:  # wrong token
+        _post(port, "/api/chat", {"text": "hi"}, token="wrong")
+    assert exc.value.code == 401
+
+
+def test_chat_post_wrong_method_rejected(server):
+    # GET /api/chat still serves the feed; DELETE is not a thing.
+    _, port = server
+    req = urllib.request.Request("http://127.0.0.1:%d/api/chat" % port,
+                                 data=b"", method="DELETE")
+    req.add_header("X-Office-Token", TEST_TOKEN)
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req, timeout=10)
+    assert exc.value.code == 405
