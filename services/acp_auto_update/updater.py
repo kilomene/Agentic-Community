@@ -359,7 +359,7 @@ def check_once(cfg):
         if rc2 != 0 or not out2:
             cfg.log("SKIP: remote unreachable: %s" % (out or out2)[:200])
             write_state(prefix, last_check=now, last_result="fetch-failed",
-                        repo=repo, installed_sha=local_sha)
+                        repo=repo)
             return "fetch-failed"
         remote_sha = out2.split()[0]
         # fetch the objects so reset works
@@ -369,22 +369,29 @@ def check_once(cfg):
         if rc != 0:
             cfg.log("SKIP: cannot read FETCH_HEAD")
             write_state(prefix, last_check=now, last_result="fetch-failed",
-                        repo=repo, installed_sha=local_sha)
+                        repo=repo)
             return "fetch-failed"
 
-    if remote_sha == local_sha:
-        cfg.log("up to date (%s)" % local_sha[:12])
+    # --- what is the lib actually synced from? -------------------------
+    # installed_sha records the commit the live lib was last synced from.
+    # The local checkout may be AHEAD of that (commits pushed from this
+    # machine), so remote==local does NOT mean the lib is current.
+    # (Failure paths above deliberately leave installed_sha untouched.)
+    synced_sha = read_state(prefix).get("installed_sha") or local_sha
+
+    if remote_sha == synced_sha:
+        cfg.log("up to date (%s)" % synced_sha[:12])
         write_state(prefix, last_check=now, last_result="up-to-date",
-                    repo=repo, installed_sha=local_sha)
+                    repo=repo, installed_sha=synced_sha)
         return "up-to-date"
 
     # --- update -------------------------------------------------------
-    cfg.log("UPDATE %s -> %s" % (local_sha[:12], remote_sha[:12]))
+    cfg.log("UPDATE %s -> %s" % (synced_sha[:12], remote_sha[:12]))
     rc, out = _git(cfg, repo, "reset", "--hard", remote_sha)
     if rc != 0:
         cfg.log("FAIL: reset failed: %s" % out[:200])
         write_state(prefix, last_check=now, last_result="reset-failed",
-                    repo=repo, installed_sha=local_sha, error=out[:200])
+                    repo=repo, error=out[:200])
         return "reset-failed"
 
     libdir = os.path.join(prefix, "lib")
@@ -393,14 +400,14 @@ def check_once(cfg):
     except Exception as e:
         cfg.log("FAIL: lib sync failed: %s" % e)
         write_state(prefix, last_check=now, last_result="sync-failed",
-                    repo=repo, installed_sha=remote_sha, error=str(e)[:200])
+                    repo=repo, error=str(e)[:200])
         return "sync-failed"
 
-    restart_needed = _daemon_paths_changed(cfg, repo, local_sha, remote_sha)
+    restart_needed = _daemon_paths_changed(cfg, repo, synced_sha, remote_sha)
     if not restart_needed:
         cfg.log("no daemon-relevant changes in %s..%s; lib synced, daemon "
                 "left running (pairing code and live sessions untouched)"
-                % (local_sha[:12], remote_sha[:12]))
+                % (synced_sha[:12], remote_sha[:12]))
     else:
         # Never restart mid-pairing: wait for handshakes to settle first.
         wait_for_pairing_quiescence(cfg, prefix)
@@ -411,7 +418,7 @@ def check_once(cfg):
                     last_result="updated" if restart_needed
                     else "updated-no-restart",
                     repo=repo, installed_sha=remote_sha,
-                    previous_sha=local_sha)
+                    previous_sha=synced_sha)
         return "updated" if restart_needed else "updated-no-restart"
 
     # --- roll back ----------------------------------------------------
