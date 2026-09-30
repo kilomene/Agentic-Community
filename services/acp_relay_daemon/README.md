@@ -143,6 +143,12 @@ channels answer via the `default` hook, peers stay off (audit
 
 ### Hook contract — `<home>/autopilot_hooks/<name>.py`
 
+A ready-made reference hook ships in `autopilot_hooks/` (this repo):
+copy `default.py` + `fleet_blocks.py` into `<home>/autopilot_hooks/`
+as `default.py`, add `agent_identity.json`, and the agent takes part
+in fleet operations (mentions, roles, tasking) — see
+`autopilot_hooks/README.md` and `docs/FLEET_OPS.md`.
+
 Stdlib only. The hook runs as a **subprocess** (isolation + killable):
 
 - **stdin:** the event dict as a single JSON document:

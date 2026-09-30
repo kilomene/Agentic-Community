@@ -22,6 +22,8 @@ dir       services/acp_auto_update              acp_auto_update
 opt-dir   services/acp_api                     acp_api
 file      services/acp_relay_daemon/daemon.py   acp_relay_daemon/daemon.py
 file      services/acp_relay_daemon/autopilot.py autopilot.py
+file      services/acp_relay_daemon/fleet_ops.py fleet_ops.py
+dir       services/acp_relay_daemon/autopilot_hooks autopilot_hooks
 touch     -                                       acp_relay_daemon/__init__.py
 file      apps/acp_cli/cli.py                   acp_cli/cli.py
 opt-file  apps/acp_cli/i18n_patch.py            acp_cli/i18n_patch.py

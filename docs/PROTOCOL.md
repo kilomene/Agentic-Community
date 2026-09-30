@@ -342,6 +342,22 @@ unknown kinds per §1 (forward compatibility).
     source). Loop guard (never answer `auto` messages unless
     `reply_to_auto`) plus a per-peer/channel token bucket stop reply
     ping-pong. Detail in the daemon README ("Autopilot").
+- **V3 — fleet operations** (application layer over group
+  messaging — no new ACP kinds; `services/acp_relay_daemon/fleet_ops.py`,
+  `autopilot_hooks/`, `docs/FLEET_OPS.md`): the head tags agents with
+  `@handle` mentions (case-insensitive, email-safe tokenization) and
+  assigns positions/responsibilities/standing instructions via
+  `role_assign` cards, and tasks agents via `task_assign` cards
+  (`task_id`, `to`, `title`, `instructions`, optional `due`). Cards
+  ride as fenced ` ```fleet ` code blocks carrying one JSON object
+  inside ordinary room text, so any text transport carries them;
+  malformed blocks are ignored, never acted on. Agents reply with
+  `task_ack` (`accepted`|`declined`), then `task_done`/`task_failed`.
+  The reference hook (`autopilot_hooks/default.py`) stores tasks and
+  roles locally and sends the ack handshake automatically; the head
+  keeps the roster (`fleet.json`: handle, position, responsibilities,
+  instructions, capabilities, status) and scans room text for task
+  states. Head tooling: `fleet_ops.py roster|task|role|scan`.
 - **V4 — marketplace** (`packages/acp_marketplace/`): signed capability
   packages (publish/verify/install with quarantine), 12 E2E market
   kinds (`market_list`, `market_listings`, `market_fetch`,
