@@ -271,12 +271,20 @@ def assign_task(roster_path, handle, title, instructions, due=None,
                 task_id=None, presence_path=None,
                 stale_after_s=wake.DEFAULT_STALE_AFTER_S,
                 outbox_dir=None, audit_path=None,
-                secret_resolver=None, allow_insecure_wake=False):
+                secret_resolver=None, allow_insecure_wake=False,
+                email_sender=None):
     """Assign a task to @handle with wake-on-task semantics.
 
     Returns a dict: task_id, to, stale, wake ({fired,status,error} or
     None), card (room text), outbox_path, events. Raises SystemExit on
     unknown handle.
+
+    The wake step dispatches on the roster wake ``channel``: ``webhook``
+    fires the URL via ``wake.fire_wake``; ``email`` sends a wake email
+    via ``wake.fire_wake_email`` (``email_sender`` injectable,
+    defaulting to the head host's connected Gmail CLI). Either way the
+    task card is also queued as a direct_msg through the daemon outbox
+    so the relay mailbox holds it as the fallback channel.
     """
     roster = load_roster(roster_path)
     handle = handle.lower()
@@ -295,7 +303,7 @@ def assign_task(roster_path, handle, title, instructions, due=None,
         wake_cfg = wake.parse_wake_config(agent.get("wake"))
     except ValueError as e:
         raise SystemExit("agent @%s: bad wake config: %s" % (handle, e))
-    if wake_cfg is not None:
+    if wake_cfg is not None and wake_cfg["channel"] == wake.CHANNEL_WEBHOOK:
         try:
             wake.validate_wake_url(wake_cfg,
                                    allow_insecure=allow_insecure_wake)
@@ -314,13 +322,23 @@ def assign_task(roster_path, handle, title, instructions, due=None,
                               display_name=agent.get("display_name"))
 
     # 1) wake the agent when it is stale and wake is configured.
+    #    Channel dispatch: webhook -> POST the payload; email -> send
+    #    the wake email. The relay direct_msg queued below stays the
+    #    fallback channel in both cases.
     if stale and wake_cfg is not None:
-        _audit("wake_attempted", url=wake_cfg["url"])
-        wake_result = wake.fire_wake(
-            wake_cfg,
-            {"to": handle, "task_id": task_id, "title": title,
-             "reason": "task_assigned_while_stale"},
-            secret_resolver=secret_resolver)
+        channel = wake_cfg.get("channel", wake.CHANNEL_WEBHOOK)
+        payload = {"to": handle, "task_id": task_id, "title": title,
+                   "instructions": instructions,
+                   "reason": "task_assigned_while_stale"}
+        if channel == wake.CHANNEL_EMAIL:
+            _audit("wake_attempted", channel="email", to=wake_cfg["to"])
+            wake_result = wake.fire_wake_email(
+                wake_cfg, payload, send_mail=email_sender)
+        else:
+            _audit("wake_attempted", channel="webhook",
+                   url=wake_cfg["url"])
+            wake_result = wake.fire_wake(
+                wake_cfg, payload, secret_resolver=secret_resolver)
         if wake_result["fired"]:
             _audit("wake_fired", status=wake_result["status"])
         else:

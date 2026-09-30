@@ -320,6 +320,15 @@ class FederationTests(unittest.TestCase):
             e_priv, e_pid = gen_pid()
             cc, _ = relay_mod.RelayClient.connect("127.0.0.1", p1, c_priv)
             ce, _ = relay_mod.RelayClient.connect("127.0.0.1", p1, e_priv)
+            # connect() returns once the hello is SENT; the server
+            # verifies it asynchronously (pure-Python Ed25519), so wait
+            # for both pids to be registered before sending -- otherwise
+            # the frame can land in the mailbox while the recipient's
+            # hello drain is still running and sit queued until the next
+            # reconnect.
+            wait_until(lambda: r1.lookup(c_pid) is not None
+                       and r1.lookup(e_pid) is not None,
+                       timeout=30, what="local pids registered")
             try:
                 frame = msg_frame(c_priv, c_pid, e_pid, "local survives")
                 cc.send_frame(frame)

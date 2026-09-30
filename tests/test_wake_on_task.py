@@ -255,6 +255,171 @@ def test_wake_unreachable_endpoint_still_queues(tmp_path):
     assert res["outbox_path"] and os.path.isfile(res["outbox_path"])
 
 
+# ------------------------------------------------- email wake channel
+
+def test_parse_wake_config_email_ok():
+    cfg = wake.parse_wake_config(
+        {"channel": "email", "to": "novaagent@mail.instinct.com"})
+    assert cfg == {"channel": "email",
+                   "to": "novaagent@mail.instinct.com"}
+    # channel defaults to webhook when omitted
+    assert wake.parse_wake_config(
+        {"url": "https://example.com/w", "secret_ref": "R"})["channel"] \
+        == "webhook"
+
+
+def test_parse_wake_config_rejects_bad_email():
+    with pytest.raises(ValueError):
+        wake.parse_wake_config({"channel": "email", "to": "not-an-email"})
+    with pytest.raises(ValueError):
+        wake.parse_wake_config({"channel": "email"})
+    with pytest.raises(ValueError):
+        wake.parse_wake_config({"channel": "smoke-signal",
+                                "to": "a@b.com"})
+
+
+def test_roster_validation_accepts_email_wake(tmp_path):
+    p = _roster(tmp_path, {"channel": "email",
+                           "to": "novaagent@mail.instinct.com"})
+    assert (fleet_ops.load_roster(p)["agents"]["instinct"]["wake"]
+            ["channel"] == "email")
+
+
+def _email_wake_roster(tmp_path):
+    return _roster(tmp_path, {"channel": "email",
+                              "to": "novaagent@mail.instinct.com"})
+
+
+def test_build_wake_email_shape():
+    cfg = {"channel": "email", "to": "novaagent@mail.instinct.com"}
+    subject, body = wake.build_wake_email(
+        cfg, {"to": "instinct", "task_id": "e1",
+              "title": "Probe the relay",
+              "instructions": "do the thing"})
+    assert subject == "[fleet task] Probe the relay"
+    assert "e1" in body
+    assert "do the thing" in body
+    assert "relay" in body.lower()
+    assert "task_ack" in body
+
+
+def test_email_wake_fires_when_stale(tmp_path):
+    sent = []
+
+    def fake_send(to, subject, body):
+        sent.append((to, subject, body))
+        return {"sent": True, "error": None}
+
+    roster = _email_wake_roster(tmp_path)
+    presence = _presence(tmp_path, time.time() - 3600)  # stale
+    outbox = str(tmp_path / "outbox")
+    audit = str(tmp_path / "audit.jsonl")
+    res = fleet_ops.assign_task(
+        roster, "instinct", "Probe the relay", "do the thing",
+        task_id="e1", presence_path=presence, stale_after_s=300,
+        outbox_dir=outbox, audit_path=audit,
+        email_sender=fake_send)
+    assert res["stale"] is True
+    assert res["wake"] is not None and res["wake"]["fired"] is True
+    assert len(sent) == 1
+    to, subject, body = sent[0]
+    assert to == "novaagent@mail.instinct.com"
+    assert subject == "[fleet task] Probe the relay"
+    assert "e1" in body
+    events = [json.loads(line) for line in
+              open(audit, encoding="utf-8").read().splitlines()]
+    kinds = [e["event"] for e in events]
+    assert "wake_attempted" in kinds
+    assert "wake_fired" in kinds
+    assert "task_queued" in kinds
+    attempted = next(e for e in events
+                     if e["event"] == "wake_attempted")
+    assert attempted["channel"] == "email"
+    assert attempted["to"] == "novaagent@mail.instinct.com"
+    assert "url" not in attempted
+    # relay fallback still queued
+    assert res["outbox_path"] and os.path.isfile(res["outbox_path"])
+    queued = json.load(open(res["outbox_path"], encoding="utf-8"))
+    assert queued["kind"] == "direct_msg"
+    assert queued["to_pid"] == "pid-instinct-001"
+
+
+def test_email_wake_failure_still_queues(tmp_path):
+    def fake_send(to, subject, body):
+        return {"sent": False, "error": "smtp exploded"}
+
+    roster = _email_wake_roster(tmp_path)
+    presence = _presence(tmp_path, time.time() - 3600)
+    audit = str(tmp_path / "audit.jsonl")
+    res = fleet_ops.assign_task(
+        roster, "instinct", "Probe", "do it", task_id="e2",
+        presence_path=presence, outbox_dir=str(tmp_path / "outbox"),
+        audit_path=audit, email_sender=fake_send)
+    assert res["wake"]["fired"] is False
+    assert res["wake"]["error"] == "smtp exploded"
+    assert res["outbox_path"] and os.path.isfile(res["outbox_path"])
+    kinds = [e["event"] for e in res["events"]]
+    assert "wake_failed" in kinds
+    assert "task_queued" in kinds
+
+
+def test_email_wake_never_raises(tmp_path):
+    def bad_send(to, subject, body):
+        raise RuntimeError("boom")
+
+    roster = _email_wake_roster(tmp_path)
+    presence = _presence(tmp_path, time.time() - 3600)
+    res = fleet_ops.assign_task(
+        roster, "instinct", "Probe", "do it", task_id="e3",
+        presence_path=presence, outbox_dir=str(tmp_path / "outbox"),
+        email_sender=bad_send)
+    assert res["wake"]["fired"] is False
+    assert "boom" in res["wake"]["error"]
+    assert res["outbox_path"] and os.path.isfile(res["outbox_path"])
+
+
+def test_no_email_when_agent_alive(tmp_path):
+    sent = []
+
+    def fake_send(to, subject, body):
+        sent.append((to, subject, body))
+        return {"sent": True, "error": None}
+
+    roster = _email_wake_roster(tmp_path)
+    presence = _presence(tmp_path, time.time() - 10)  # fresh
+    res = fleet_ops.assign_task(
+        roster, "instinct", "Probe", "do it", task_id="e4",
+        presence_path=presence, outbox_dir=str(tmp_path / "outbox"),
+        email_sender=fake_send)
+    assert res["stale"] is False
+    assert res["wake"] is None
+    assert sent == []
+    assert res["outbox_path"] and os.path.isfile(res["outbox_path"])
+
+
+def test_default_email_sender_argv_and_failure():
+    import subprocess as _sp
+    from unittest import mock
+    with mock.patch.object(wake.subprocess, "run") as run:
+        run.return_value = mock.Mock(returncode=0, stdout="",
+                                     stderr="")
+        out = wake.default_email_sender("a@b.com", "subj", "body")
+        assert out == {"sent": True, "error": None}
+        argv = run.call_args[0][0]
+        assert argv[:4] == ["hatch_gws_cli", "gmail", "+send", "--to"]
+        assert "--subject" in argv and "--body" in argv
+        assert "a@b.com" in argv and "subj" in argv
+    with mock.patch.object(wake.subprocess, "run") as run:
+        run.return_value = mock.Mock(returncode=1, stdout="",
+                                     stderr="nope")
+        out = wake.default_email_sender("a@b.com", "subj", "body")
+        assert out["sent"] is False and "nope" in out["error"]
+    with mock.patch.object(wake.subprocess, "run",
+                           side_effect=_sp.TimeoutExpired("x", 1)):
+        out = wake.default_email_sender("a@b.com", "subj", "body")
+        assert out["sent"] is False and out["error"]
+
+
 # ------------------------------------------------- daemon outbox direct_msg
 
 def test_daemon_outbox_direct_msg(tmp_path):

@@ -216,6 +216,12 @@ class RelayHandler(socketserver.BaseRequestHandler):
         drain_ev = self.server.begin_drain(pid)
         try:
             self.drain_mailbox(pid)
+            # A frame for this pid may have been stored between our
+            # first drain check and now (dispatch raced our hello
+            # verification); sweep once more so it is delivered on
+            # this connection instead of sitting queued until the
+            # next reconnect.
+            self.drain_mailbox(pid)
         finally:
             self.server.end_drain(pid, drain_ev)
         try:

@@ -11,7 +11,8 @@ describes how it works and, honestly, where it stops.
    agent's presence (`last_seen` in the presence store), and:
    - if presence is **stale** (older than `--stale-after`, default 300s,
      or never seen) **and** the roster entry carries a `wake` block ->
-     fires the wake webhook (POST, ~5s timeout, non-blocking);
+     fires the wake channel (webhook POST with ~5s timeout, or a wake
+     email — both non-blocking);
    - renders the task card and queues it as a `direct_msg` in the
      daemon outbox (`outbox/task-<handle>-<task_id>.json`).
 2. **Daemon drains the outbox** through its single live relay link
@@ -42,16 +43,45 @@ Every link is audit-logged: `wake_attempted`, `wake_fired` /
 
 ## Roster config
 
+A roster `wake` block names a **channel** (`webhook` is the default):
+
 ```json
-{"wake": {"url": "https://wake.example/agents/instinct",
+{"wake": {"channel": "webhook",
+          "url": "https://wake.example/agents/instinct",
           "method": "POST",
           "timeout_s": 5,
           "secret_ref": "INSTINCT_WAKE_TOKEN"}}
 ```
 
+```json
+{"wake": {"channel": "email",
+          "to": "novaagent@mail.instinct.com"}}
+```
+
+The `email` channel sends the wake email through the head host's
+connected Gmail (`hatch_gws_cli gmail +send`): subject `[fleet task]
+<title>`, body with the task summary plus a note that the full task
+card is queued on the ACP relay. No secret is needed — Gmail auth is
+already connected on the head, and nothing credential-shaped is stored
+anywhere. Either way, the task card is ALSO queued as a `direct_msg`
+through the daemon outbox, so the relay mailbox remains the fallback
+channel: a missed wake email never loses the task.
+
+Live example — instinct-agent (runs on Instinct's sealed cloud, no
+webhook possible; its wake hook is its own inbox):
+
+```json
+"instinct": {
+  "agent_id": "WOLj9S3LmeFaFm4TlCuzxgyMDEYIvcgv2z2tV4x7naw",
+  "display_name": "instinct",
+  "wake": {"channel": "email", "to": "novaagent@mail.instinct.com"}
+}
+```
+
 Rules (`services/acp_relay_daemon/wake.py`):
 
-- `url` **must be https**. `http` is accepted only with the explicit
+- `channel` is `webhook` or `email` (default `webhook`).
+- Webhook channel: `url` **must be https**. `http` is accepted only with the explicit
   test flag (`--insecure-wake` / `allow_insecure_wake=True`) and only
   for loopback hosts (127.0.0.1, ::1, localhost).
 - `url` must not embed credentials (`user:pass@host` is rejected).
@@ -60,6 +90,10 @@ Rules (`services/acp_relay_daemon/wake.py`):
   the Secure Vault and is resolved at fire time by the caller's
   `secret_resolver(secret_ref)`. It travels as a `Bearer` header and is
   never logged, never returned, never written to disk.
+- Email channel: `to` must be a valid email address; no `url` or
+  `secret_ref` is needed. `fire_wake_email` never raises; a send
+  failure is audit-logged as `wake_failed` and the assignment still
+  queues via the relay fallback.
 
 ## Presence
 

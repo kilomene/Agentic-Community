@@ -13,21 +13,39 @@ holds only a ``secret_ref`` — a name the caller's ``secret_resolver``
 maps to the real value (the Secure Vault in production, a stub in
 tests). ``fire_wake`` never logs or returns the secret.
 
-Roster config::
+Wake channels. A roster ``wake`` block names a ``channel``:
 
-    {"wake": {"url": "https://sandbox.example/wake/<token-ish-path>",
-              "method": "POST",
-              "timeout_s": 5,
-              "secret_ref": "INSTINCT_WAKE_TOKEN"}}
+- ``webhook`` (default) — POST the task payload to ``url``::
+
+      {"wake": {"url": "https://sandbox.example/wake/<token-ish-path>",
+                "method": "POST",
+                "timeout_s": 5,
+                "secret_ref": "INSTINCT_WAKE_TOKEN"}}
+
+- ``email`` — send a wake email to ``to`` via the head host's
+  connected Gmail (``hatch_gws_cli gmail +send``). No secret needed;
+  Gmail auth is already connected on the head, and nothing credential-
+  shaped is stored anywhere::
+
+      {"wake": {"channel": "email",
+                "to": "novaagent@mail.instinct.com"}}
 
 Stdlib only.
 """
 
 import json
 import os
+import re
+import subprocess
 import time
 import urllib.parse
 import urllib.request
+
+CHANNEL_WEBHOOK = "webhook"
+CHANNEL_EMAIL = "email"
+CHANNELS = (CHANNEL_WEBHOOK, CHANNEL_EMAIL)
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 DEFAULT_METHOD = "POST"
 DEFAULT_TIMEOUT_S = 5
@@ -46,15 +64,27 @@ def _is_loopback_host(host):
 def parse_wake_config(cfg):
     """Validate the structural shape of a roster ``wake`` block.
 
-    Returns the normalized dict ``{"url", "method", "timeout_s",
-    "secret_ref"}``, or None when no wake block is configured (cfg is
-    None). Raises ValueError on malformed config. URL scheme policy
-    (https, or http loopback) is checked by ``validate_wake_url``.
+    Returns the normalized dict. For channel ``webhook`` (the default):
+    ``{"channel", "url", "method", "timeout_s", "secret_ref"}``. For
+    channel ``email``: ``{"channel", "to"}``. Returns None when no wake
+    block is configured (cfg is None). Raises ValueError on malformed
+    config. URL scheme policy (https, or http loopback) is checked by
+    ``validate_wake_url`` (webhook channel only).
     """
     if cfg is None:
         return None
     if not isinstance(cfg, dict):
         raise ValueError("wake config must be an object")
+    channel = str(cfg.get("channel", CHANNEL_WEBHOOK)).strip().lower()
+    if channel == CHANNEL_EMAIL:
+        to = cfg.get("to")
+        if not isinstance(to, str) or not _EMAIL_RE.match(to.strip()):
+            raise ValueError("wake.to must be a valid email address "
+                             "for channel 'email'")
+        return {"channel": CHANNEL_EMAIL, "to": to.strip()}
+    if channel != CHANNEL_WEBHOOK:
+        raise ValueError("wake.channel must be one of %s, got %r"
+                         % (list(CHANNELS), cfg.get("channel")))
     url = cfg.get("url")
     if not isinstance(url, str) or not url.strip():
         raise ValueError("wake.url must be a non-empty string")
@@ -72,7 +102,8 @@ def parse_wake_config(cfg):
     if not (MIN_TIMEOUT_S <= timeout_s <= MAX_TIMEOUT_S):
         raise ValueError("wake.timeout_s must be between %d and %d seconds"
                          % (MIN_TIMEOUT_S, MAX_TIMEOUT_S))
-    return {"url": url.strip(),
+    return {"channel": CHANNEL_WEBHOOK,
+            "url": url.strip(),
             "method": method.strip().upper(),
             "timeout_s": timeout_s,
             "secret_ref": secret_ref.strip()}
@@ -136,6 +167,92 @@ def fire_wake(cfg, payload, secret_resolver=None, timeout=None):
     except Exception as e:  # noqa: BLE001 - non-blocking by design
         result["error"] = "%s: %s" % (type(e).__name__, e)
     return _redact_secret(result)
+
+
+# ------------------------------------------------------------ email wake
+
+def build_wake_email(cfg, payload):
+    """Render the wake email for an ``email``-channel wake config.
+
+    Returns ``(subject, body)``. The subject is ``[fleet task] <title>``;
+    the body carries the task summary and points the agent at the ACP
+    relay mailbox, where the full task card is already queued.
+    """
+    payload = payload or {}
+    title = payload.get("title") or "(untitled task)"
+    task_id = payload.get("task_id") or "?"
+    to_handle = payload.get("to") or "agent"
+    instructions = (payload.get("instructions") or "").strip()
+    subject = "[fleet task] %s" % title
+    lines = [
+        "Phoenix fleet wake-on-task.",
+        "",
+        "A task was assigned to @%s while its presence was stale, so "
+        "this wake email was sent." % to_handle,
+        "",
+        "Task: %s" % title,
+        "Task ID: %s" % task_id,
+    ]
+    if instructions:
+        lines += ["", "Instructions:", instructions]
+    lines += [
+        "",
+        "The full task card is queued as a direct message on the ACP "
+        "relay mailbox — reconnect and drain your mailbox to pick it up, "
+        "then ack with a task_ack fleet block.",
+    ]
+    return subject, "\n".join(lines)
+
+
+def default_email_sender(to, subject, body, timeout_s=30):
+    """Send via the head host's connected Gmail CLI. Never raises.
+
+    Returns ``{"sent": bool, "error": str|None}``. No credentials are
+    handled here — the CLI uses the host's connected Gmail account.
+    """
+    try:
+        proc = subprocess.run(
+            ["hatch_gws_cli", "gmail", "+send",
+             "--to", to, "--subject", subject, "--body", body],
+            capture_output=True, text=True, timeout=timeout_s)
+    except Exception as e:  # noqa: BLE001 - non-blocking by design
+        return {"sent": False,
+                "error": "%s: %s" % (type(e).__name__, e)}
+    if proc.returncode != 0:
+        err = ((proc.stderr or "") + (proc.stdout or "")).strip()
+        return {"sent": False,
+                "error": "gmail +send exited %d: %s"
+                         % (proc.returncode, err[:200])}
+    return {"sent": True, "error": None}
+
+
+def fire_wake_email(cfg, payload, send_mail=None):
+    """Send the wake email. NEVER raises — wake is a nudge, and a wake
+    failure must never block the task assignment.
+
+    ``cfg`` is a parsed email-channel wake config (see
+    ``parse_wake_config``). ``payload`` carries to/task_id/title (and
+    optionally instructions). ``send_mail`` is an injectable
+    ``(to, subject, body) -> {"sent", "error"}`` callable; the default
+    sends through the head host's connected Gmail CLI.
+
+    Returns ``{"fired": bool, "status": None, "error": str|None}`` —
+    the same shape as ``fire_wake`` so callers can treat channels
+    uniformly.
+    """
+    result = {"fired": False, "status": None, "error": None}
+    try:
+        if cfg.get("channel") != CHANNEL_EMAIL:
+            raise ValueError("not an email wake config")
+        subject, body = build_wake_email(cfg, payload)
+        sender = send_mail or default_email_sender
+        outcome = sender(cfg["to"], subject, body) or {}
+        result["fired"] = bool(outcome.get("sent"))
+        if not result["fired"]:
+            result["error"] = outcome.get("error") or "send failed"
+    except Exception as e:  # noqa: BLE001 - non-blocking by design
+        result["error"] = "%s: %s" % (type(e).__name__, e)
+    return result
 
 
 # ------------------------------------------------------------- presence
