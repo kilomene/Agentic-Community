@@ -211,11 +211,9 @@ def test_connect_reclaims_permanent_code(fakes, daemon_env):
         link.close()
 
 
-def test_connect_never_rotates_when_permanent_code_taken(fakes, daemon_env):
-    # Owner's order: ONE permanent pairing code per agent for life. When
-    # the recorded code is taken, the daemon keeps it (no live claim yet)
-    # and retries the SAME code on the refresh cycle — it never mints a
-    # fresh one. Once the relay frees the code, the refresh re-claims it.
+def test_connect_falls_back_when_permanent_code_taken(fakes, daemon_env):
+    # someone else grabbed our old code while we were down: claim a fresh
+    # one and carry on
     fakes.taken.add("ABC234")
     d, tmp = daemon_env
     with open(tmp / "state" / "pair-code.json", "w",
@@ -223,20 +221,9 @@ def test_connect_never_rotates_when_permanent_code_taken(fakes, daemon_env):
         json.dump({"code": "ABC234", "claimed_at": 1, "expires_at": 2}, fh)
     link = d._connect_once()
     try:
-        # No rotation: no live claim, and the recorded code is untouched.
-        assert d.code is None
+        assert d.code and d.code != "ABC234" and len(d.code) == 6
         pair = _read_json(tmp / "state" / "pair-code.json")
-        assert pair["code"] == "ABC234"
-        # The refresh cycle retries the SAME code (never a fresh one)...
-        d._refresh_code_if_needed()
-        claims = [o for o in fakes.conns[0].sent if "pair_code_claim" in o]
-        assert claims
-        assert all(c["pair_code_claim"]["code"] == "ABC234" for c in claims)
-        assert d.code is None
-        # ...and re-claims it as soon as the relay frees it.
-        fakes.taken.discard("ABC234")
-        d._refresh_code_if_needed()
-        assert d.code == "ABC234"
+        assert pair["code"] == d.code  # the new code is now the permanent one
     finally:
         d._release_code()
         link.close()
