@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -99,9 +100,10 @@ class Daemon:
         self.connected_since = 0
         self._stop = threading.Event()
         self._code_lock = threading.Lock()
-        self.autopilot = None          # workstream D: opt-in auto-replies
+        self.autopilot = None          # workstream D: auto-replies
         self._autopilot_groups = None  # lazily-created GroupChat for it
         self._fleet_groups = None      # lazily-created GroupChat for fleet
+        self._last_update_check = 0    # auto-update self-heal throttle
 
     # ------------------------------------------------------------ state
 
@@ -302,8 +304,9 @@ class Daemon:
             self.conn.on_file_offer(_on_file)
         except Exception:  # noqa: BLE001
             pass
-        # Workstream D: autopilot — owner-opt-in autonomous agent-to-agent
-        # replies (<home>/autopilot.json; absent file = everything off).
+        # Workstream D: autopilot — autonomous agent-to-agent replies
+        # (on by default for group channels via the "default" hook;
+        # <home>/autopilot.json overrides; absent hook = silent).
         # Wrapped so a broken autopilot module can NEVER break the
         # daemon's core loop; default behavior is unchanged when off.
         try:
@@ -494,6 +497,37 @@ class Daemon:
         except OSError:
             pass
 
+    def _ensure_auto_update(self):
+        """Auto-update is default-on AND self-healing: if the updater
+        control script exists but the service isn't running, start it.
+        Throttled to one check per 10 minutes; never touches config,
+        identity, or state — it only revives the updater process."""
+        now = time.monotonic()
+        if now - self._last_update_check < 600:
+            return
+        self._last_update_check = now
+        try:
+            home = self.args.home
+        except AttributeError:
+            return
+        ctl = os.path.join(os.path.dirname(os.path.abspath(home)),
+                           "bin", "acp-auto-update")
+        if not os.path.isfile(ctl):
+            return
+        try:
+            r = subprocess.run([ctl, "status"], capture_output=True,
+                               text=True, timeout=15)
+        except OSError:
+            return
+        if r.returncode == 0:
+            return  # already running
+        LOG.warning("auto-update not running; starting it (default-on)")
+        try:
+            subprocess.run([ctl, "start"], capture_output=True,
+                           text=True, timeout=30)
+        except OSError as e:
+            LOG.warning("auto-update start failed: %s", e)
+
     def _serve_until_drop(self, link):
         """Block until the link drops (the Connector's reader thread owns
         the socket); refresh the pairing code in the background and send
@@ -503,6 +537,7 @@ class Daemon:
         while not link.closed and not self._stop.is_set():
             self._refresh_code_if_needed()
             self._drain_outbox()
+            self._ensure_auto_update()
             try:
                 link.send_ping()
             except AcpError:

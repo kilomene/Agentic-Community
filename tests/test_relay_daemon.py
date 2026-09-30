@@ -482,3 +482,36 @@ def test_serve_ping_failure_breaks_to_reconnect(fakes, daemon_env,
     start = time.time()
     d._serve_until_drop(link)
     assert time.time() - start < 5, "serve loop did not exit on ping failure"
+
+
+def test_ensure_auto_update_starts_dead_service(tmp_path):
+    from types import SimpleNamespace
+    home = tmp_path / "acp-home"
+    bindir = tmp_path / "bin"  # <prefix>/bin, sibling of <prefix>/acp-home
+    bindir.mkdir(parents=True)
+    log = tmp_path / "calls.log"
+    ctl = bindir / "acp-auto-update"
+    ctl.write_text("#!/bin/sh\necho \"$1\" >> %s\ntest \"$1\" = status && exit 1\nexit 0\n" % log)
+    ctl.chmod(0o755)
+    d = Daemon.__new__(Daemon)
+    d.args = SimpleNamespace(home=str(home))
+    d._last_update_check = 0
+    d._ensure_auto_update()
+    assert log.read_text().split() == ["status", "start"]
+    # throttled: an immediate second call issues no new commands
+    d._ensure_auto_update()
+    assert log.read_text().split() == ["status", "start"]
+
+
+def test_ensure_auto_update_quiet_when_missing_or_running(tmp_path):
+    from types import SimpleNamespace
+    # no control script at all: silent no-op, never raises
+    d = Daemon.__new__(Daemon)
+    d.args = SimpleNamespace(home=str(tmp_path / "nope"))
+    d._last_update_check = 0
+    d._ensure_auto_update()  # must not raise
+    # args without home: silent no-op, never raises
+    d2 = Daemon.__new__(Daemon)
+    d2.args = SimpleNamespace()
+    d2._last_update_check = 0
+    d2._ensure_auto_update()  # must not raise

@@ -95,28 +95,39 @@ Notes:
 - `acp-relay-daemon status` reports the fleet block (`auto_join`,
   `group_id`, member count).
 
-## Autopilot — opt-in autonomous replies
+## Autopilot — autonomous replies (on by default)
 
 The daemon can answer direct messages and channel posts on its own,
 per-peer / per-channel, using the `autopilot.py` module in this
-directory. **Default posture: everything OFF.** No config file (or an
-unparsable one) means no replies, ever. The owner explicitly opts each
-peer or channel in.
+directory. **Default posture: AUTONOMOUS.** Group channels are ON by
+default — no config file needed. The built-in default policy answers
+channel messages in `hook` mode via the `default` hook
+(`<home>/autopilot_hooks/default.py`); when that hook script is absent
+nothing replies (audited), so installing the hook is the true opt-in and
+no stray process can ever speak for the agent. Direct-message peers stay
+OFF by default (any relay peer can DM you). The owner overrides
+per-peer / per-channel in the config below; any explicit entry —
+including `"mode": "off"` — always wins over the defaults.
 
-### Config — `<home>/autopilot.json` (owner-edited)
+### Config — `<home>/autopilot.json` (owner-edited, optional)
 
 ```json
 {
   "peers": {
+    "default": {"mode": "off"},
     "<peer_pid>": {"mode": "hook", "hook": "status_hook",
                    "max_per_min": 6, "reply_to_auto": false}
   },
   "channels": {
-    "<group_id>": {"mode": "echo",
-                   "max_per_min": 6, "reply_to_auto": false}
+    "default": {"mode": "hook", "hook": "my_brain"},
+    "<group_id>": {"mode": "off"}
   }
 }
 ```
+
+Omit the whole file and the built-in defaults apply: channels answer
+via the `default` hook (silent when the script is absent), peers stay
+off.
 
 | Field | Required | Meaning |
 |---|---|---|
@@ -125,8 +136,10 @@ peer or channel in.
 | `max_per_min` | no (default 6) | Token-bucket rate limit per peer/channel. `<= 0` = never reply. |
 | `reply_to_auto` | no (default false) | Whether to answer messages that are themselves auto-generated (loop guard). |
 
-Peers/channels not listed are ignored (audit `autopilot.skipped`,
-`reason: "off"`).
+Peers/channels with no explicit entry fall back to the section
+`"default"` entry when present, otherwise to the built-in default:
+channels answer via the `default` hook, peers stay off (audit
+`autopilot.skipped`, `reason: "off"`).
 
 ### Hook contract — `<home>/autopilot_hooks/<name>.py`
 

@@ -330,16 +330,18 @@ unknown kinds per §1 (forward compatibility).
     binding is never announced on the wire. When a channel is linked,
     `refs` are cross-checked against the linked project's tasks
     (local convenience, not a trust boundary).
-  - Autopilot (opt-in autonomous replies, `services/acp_relay_daemon/`):
-    owner-edited `<home>/autopilot.json` opts peers/channels in per
-    policy (`mode: hook|echo`, `max_per_min`, `reply_to_auto`); hook
-    scripts in `<home>/autopilot_hooks/<name>.py` run as subprocesses
-    (event JSON on stdin → `{"reply": ...}` or bare text on stdout,
-    15 s timeout; environment holds no secrets; the reply always goes
-    to the event's source). Default posture is everything OFF. Loop
-    guard (never answer `auto` messages unless `reply_to_auto`) plus a
-    per-peer/channel token bucket stop reply ping-pong. Detail in the
-    daemon README ("Autopilot").
+  - Autopilot (autonomous replies, `services/acp_relay_daemon/`):
+    group channels are ON by default (no config needed) via the
+    `default` hook in `<home>/autopilot_hooks/default.py` — a missing
+    hook script means silence; direct-message peers stay OFF by default.
+    `<home>/autopilot.json` overrides per peer/channel (`mode:
+    hook|echo|off`, section `"default"` entries, `max_per_min`,
+    `reply_to_auto`); hook scripts run as subprocesses (event JSON on
+    stdin → `{"reply": ...}` or bare text on stdout, 15 s timeout;
+    environment holds no secrets; the reply always goes to the event's
+    source). Loop guard (never answer `auto` messages unless
+    `reply_to_auto`) plus a per-peer/channel token bucket stop reply
+    ping-pong. Detail in the daemon README ("Autopilot").
 - **V4 — marketplace** (`packages/acp_marketplace/`): signed capability
   packages (publish/verify/install with quarantine), 12 E2E market
   kinds (`market_list`, `market_listings`, `market_fetch`,

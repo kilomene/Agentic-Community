@@ -1,11 +1,12 @@
-"""Workstream D tests: Autopilot — opt-in autonomous agent-to-agent chat.
+"""Workstream D tests: Autopilot — autonomous agent-to-agent chat.
 
-Covers: config-absent default-off, echo mode replies (threaded when the
-API supports it, plain-send fallback otherwise), hook subprocess
-contract, malicious-hook recipient confinement, loop guard, token-bucket
-rate limiting, poll_events cursor behavior, and graceful degradation
-when workstream A/C features (send_reply, auto/reply_to columns) are
-absent.
+Covers: default posture (group channels on by default via the "default"
+hook, DMs off by default, explicit entries always win), echo mode
+replies (threaded when the API supports it, plain-send fallback
+otherwise), hook subprocess contract, malicious-hook recipient
+confinement, loop guard, token-bucket rate limiting, poll_events cursor
+behavior, and graceful degradation when workstream A/C features
+(send_reply, auto/reply_to columns) are absent.
 
 Run: python3 -m pytest tests/test_im_autopilot.py -q
 """
@@ -102,18 +103,74 @@ def make_autopilot(home, conn, **kw):
     return ap
 
 
-# ------------------------------------------------------------ default-off
+# ------------------------------------------------------------ defaults
 
-def test_config_absent_everything_off():
+def test_config_absent_peer_stays_off_channel_silent_without_hook():
+    """Absent config: DMs stay off; group channels fall back to the
+    built-in default (hook "default") — with no hook script installed
+    nothing replies."""
     home = make_home()  # no autopilot.json
     conn = FakeConn(with_send_reply=True)
-    ap = make_autopilot(home, conn)
+    groups = FakeGroups()
+    ap = make_autopilot(home, conn, groups=groups)
     ap.handle_direct("SOMEPEER", "hello", "m1")
     ap.handle_group("g-1", "SOMEPEER", "hi all", 1)
     assert conn.sent == []
+    assert groups.sent == []
     reasons = [ev[4].get("reason") for ev in conn.audit.events
                if ev[0] == "autopilot.skipped"]
-    assert "off" in reasons
+    assert "off" in reasons          # the DM
+    assert "hook_missing" in reasons  # the group message
+
+
+def test_channel_builtin_default_replies_when_default_hook_present():
+    """No config at all + a default.py hook installed = the agent is
+    autonomous in group rooms with zero configuration."""
+    home = make_home()
+    write_hook(home, "default", "print('auto: on duty')\n")
+    conn = FakeConn()
+    groups = FakeGroups()
+    ap = make_autopilot(home, conn, groups=groups)
+    ap.handle_group("g-1", "SOMEPEER", "roll call", 3)
+    assert len(groups.sent) == 1
+    gid, text, _ = groups.sent[0]
+    assert gid == "g-1"
+    assert text == "auto: on duty"
+    sent = [ev for ev in conn.audit.events
+            if ev[0] == "autopilot.reply_sent"]
+    assert sent[0][4].get("policy") == "builtin_default"
+
+
+def test_channel_explicit_off_beats_builtin_default():
+    home = make_home({"channels": {"g-1": {"mode": "off"}}})
+    write_hook(home, "default", "print('should not send')\n")
+    conn = FakeConn()
+    groups = FakeGroups()
+    ap = make_autopilot(home, conn, groups=groups)
+    ap.handle_group("g-1", "SOMEPEER", "roll call", 3)
+    assert groups.sent == []
+
+
+def test_channel_section_default_overrides_builtin():
+    home = make_home({"channels": {"default": {"mode": "echo"}}})
+    conn = FakeConn()
+    groups = FakeGroups()
+    ap = make_autopilot(home, conn, groups=groups)
+    ap.handle_group("g-9", "SOMEPEER", "hello", 4)
+    assert groups.sent[0][1] == "echo: hello"
+    sent = [ev for ev in conn.audit.events
+            if ev[0] == "autopilot.reply_sent"]
+    assert sent[0][4].get("policy") == "section_default"
+
+
+def test_peers_section_default_enables_dm_autopilot():
+    """DMs stay off by default, but one section-level entry flips them."""
+    home = make_home({"peers": {"default": {"mode": "echo"}}})
+    conn = FakeConn(with_send_reply=True)
+    ap = make_autopilot(home, conn)
+    ap.handle_direct("STRANGER", "hello", "m1")
+    assert len(conn.sent) == 1
+    assert conn.sent[0][2] == "echo: hello"
 
 
 def test_unknown_peer_ignored():

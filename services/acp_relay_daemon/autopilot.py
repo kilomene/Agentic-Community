@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Workstream D: Autopilot — daemon-side autonomous agent-to-agent chat.
 
-Default posture: EVERYTHING IS OFF. The owner explicitly opts each peer
-(direct messages) or channel (group chats) in via ``<home>/autopilot.json``.
-An absent config file means no replies, ever.
+Default posture: AUTONOMOUS. Group channels are ON by default — no
+``autopilot.json`` needed. The built-in default policy answers channel
+messages in ``hook`` mode via the ``default`` hook
+(``<home>/autopilot_hooks/default.py``); when that hook script is
+absent nothing replies (audited as ``hook_missing``), so installing the
+hook is the true opt-in and no stray process can ever speak for the
+agent. Direct-message peers stay OFF by default (any relay peer can DM
+you): opt a peer in explicitly, or set a ``"default"`` policy under
+``"peers"``. Any explicit entry — including ``"mode": "off"`` — always
+wins over the defaults, so the owner can always silence a peer/channel.
 
 Two modes per peer/channel:
 
@@ -60,6 +67,7 @@ DEFAULT_HOOK_TIMEOUT = 15.0
 RATE_WINDOW = 60.0
 
 _HOOK_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_DEFAULT_HOOK_NAME = "default"
 _MAX_REPLY_CHARS = 4000
 _MAX_EVENT_TEXT_CHARS = 8000
 _MAX_HOOK_STDOUT = 65536
@@ -83,6 +91,14 @@ def _accepts_kwarg(fn, name):
 def _policy_defaults():
     return {"mode": None, "hook": None, "max_per_min": DEFAULT_MAX_PER_MIN,
             "reply_to_auto": False}
+
+
+def _builtin_default_policy():
+    """Built-in default policy: group channels answer in hook mode via
+    the ``default`` hook. A missing hook script means silence (audited
+    as ``hook_missing``) — installing the hook is the true opt-in."""
+    return {"mode": "hook", "hook": _DEFAULT_HOOK_NAME,
+            "max_per_min": DEFAULT_MAX_PER_MIN, "reply_to_auto": False}
 
 
 def _normalize_policy(raw):
@@ -109,7 +125,7 @@ def _normalize_policy(raw):
 
 
 class Autopilot:
-    """Owner-opt-in autonomous replies for the relay daemon.
+    """Autonomous replies for the relay daemon — on by default.
 
     ``conn`` is any connector-like object exposing ``send_message`` /
     ``on_message`` and (optionally) ``messaging.send_reply``,
@@ -158,28 +174,72 @@ class Autopilot:
     # ------------------------------------------------------------- config
 
     def load_config(self):
-        """Owner-edited config. Absent/unparseable file = everything off."""
+        """Owner-edited config.
+
+        Shape: ``{"peers": {peer_id: policy, ...}, "channels":
+        {group_id: policy, ...}}`` where each section may also carry a
+        ``"default"`` entry used as that section's fallback. A policy
+        entry is ``{"mode": "hook"|"echo", ...}``; ``"mode": "off"``
+        (or any invalid entry) explicitly disables that peer/channel.
+
+        Precedence per peer/channel: explicit entry -> section
+        ``"default"`` -> built-in default (channels: answer via the
+        ``default`` hook; peers: off). An absent/unparseable file is
+        the same as an empty config — the built-in defaults apply.
+        Explicit-off entries are stored as ``False`` so they stay
+        distinguishable from absent keys.
+        """
+        cfg = {"peers": {}, "channels": {},
+               "defaults": {"peers": None, "channels": None}}
         try:
             with open(self.config_path, "r", encoding="utf-8") as fh:
                 raw = json.load(fh)
         except (OSError, ValueError) as e:
             if isinstance(e, OSError) and not os.path.exists(self.config_path):
-                LOG.debug("autopilot: no config at %s (everything off)",
+                LOG.debug("autopilot: no config at %s (built-in defaults)",
                           self.config_path)
             else:
-                LOG.warning("autopilot: bad config %s: %s (everything off)",
-                            self.config_path, e)
-            return {"peers": {}, "channels": {}}
-        cfg = {"peers": {}, "channels": {}}
+                LOG.warning("autopilot: bad config %s: %s"
+                            " (built-in defaults)", self.config_path, e)
+            return cfg
+        if not isinstance(raw, dict):
+            return cfg
         for section in ("peers", "channels"):
-            entries = raw.get(section) if isinstance(raw, dict) else None
+            entries = raw.get(section)
             if not isinstance(entries, dict):
                 continue
             for key, entry in entries.items():
                 p = _normalize_policy(entry)
-                if p is not None:
-                    cfg[section][str(key)] = p
+                stored = p if p is not None else False
+                if key == "default":
+                    cfg["defaults"][section] = stored
+                else:
+                    cfg[section][str(key)] = stored
         return cfg
+
+    def _resolve_policy(self, cfg, section, key):
+        """Effective policy for one peer/channel.
+
+        Returns ``(policy_or_None, source)``; ``source`` is one of
+        ``"explicit"``, ``"section_default"``, ``"builtin_default"``,
+        ``"off"``. Precedence: explicit entry (an invalid/``"off"``
+        entry means explicitly off) -> section ``"default"`` ->
+        built-in default (channels answer via the ``default`` hook;
+        peers stay off).
+        """
+        if key in cfg[section]:
+            entry = cfg[section][key]
+            if entry is False:
+                return None, "off"
+            return entry, "explicit"
+        dflt = cfg["defaults"][section]
+        if dflt is not None:
+            if dflt is False:
+                return None, "off"
+            return dflt, "section_default"
+        if section == "channels":
+            return _builtin_default_policy(), "builtin_default"
+        return None, "off"
 
     # -------------------------------------------------------------- audit
 
@@ -339,7 +399,7 @@ class Autopilot:
         cfg = self.load_config()
         section = "peers" if kind == "message" else "channels"
         key = sender if kind == "message" else event.get("group_id")
-        policy = cfg[section].get(key)
+        policy, policy_source = self._resolve_policy(cfg, section, key)
         target = key  # audit target: peer pid or group id
 
         if policy is None:
@@ -397,6 +457,7 @@ class Autopilot:
         self._audit("autopilot.reply_sent", actor=sender, target=target,
                     details={"kind": kind, "msg_id": event.get("msg_id"),
                              "hook": hook_name,
+                             "policy": policy_source,
                              "bytes": len(reply.encode("utf-8"))})
 
     # --------------------------------------------------------- rate limit
