@@ -93,7 +93,22 @@ def _load_connector(home, passphrase):
     except ImportError:
         _repo_packages_on_path()
         from acp_connector import Connector  # noqa: F811
-    return Connector(os.path.abspath(home), passphrase)
+    # A dying previous daemon may still hold connector.db's write lock for
+    # a moment (e.g. a wrapper restart raced its shutdown). Retry briefly
+    # instead of crashing instantly on the transient lock.
+    import sqlite3
+    last = None
+    for attempt in range(6):
+        try:
+            return Connector(os.path.abspath(home), passphrase)
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e):
+                raise
+            last = e
+            LOG.warning("connector.db locked on startup (attempt %d/6); "
+                        "retrying in 2s", attempt + 1)
+            time.sleep(2)
+    raise last
 
 
 def _write_json(path, obj):
